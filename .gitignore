@@ -1,0 +1,34 @@
+# ==========================
+# SECRET & ENVIRONMENT FILES — NEVER commit these
+# ==========================
+.env
+.env.*
+*.env
+secrets.py
+
+# ==========================
+# Python
+# ==========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# ==========================
+# IDE & OS
+# ==========================
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
