@@ -1,8 +1,6 @@
 import streamlit as st
-import os
-import json
 import io
-from datetime import datetime, timedelta
+from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
@@ -11,28 +9,7 @@ from utils import RSS_FEEDS, fetch_top_stories, rewrite_with_groq, rewrite_with_
 
 st.set_page_config(page_title="Newsdrum AI Aggregator Panel", layout="wide")
 
-LOCK_FILE = ".csv_lock.json"
 
-# ── 24-hour lock helpers ──────────────────────────────────────
-def can_export():
-    try:
-        if os.path.exists(LOCK_FILE):
-            with open(LOCK_FILE, "r") as f:
-                data = json.load(f)
-            last = datetime.fromisoformat(data["last_exported"])
-            diff = datetime.now() - last
-            if diff < timedelta(hours=24):
-                remaining = timedelta(hours=24) - diff
-                h = int(remaining.total_seconds() // 3600)
-                m = int((remaining.total_seconds() % 3600) // 60)
-                return False, f"{h}h {m}m"
-    except Exception:
-        pass
-    return True, None
-
-def mark_exported():
-    with open(LOCK_FILE, "w") as f:
-        json.dump({"last_exported": datetime.now().isoformat()}, f)
 
 def build_excel(rows):
     """
@@ -102,30 +79,21 @@ def build_excel(rows):
     return buf.getvalue()
 
 def render_export_button(slot):
-    allowed, time_left = can_export()
     has_data = len(st.session_state.csv_rows) > 0
 
     with slot:
-        if allowed and has_data:
+        if has_data:
             fname = (
                 f"newsdrum_{st.session_state.active_source.replace(' ', '_')}_"
                 f"{datetime.now().strftime('%Y%m%d')}.xlsx"
             )
             excel_bytes = build_excel(st.session_state.csv_rows)
-            if st.download_button(
+            st.download_button(
                 label="📥 Export Excel",
                 data=excel_bytes,
                 file_name=fname,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
-            ):
-                mark_exported()
-        elif not allowed:
-            st.button(
-                f"⏳ {time_left}",
-                disabled=True,
-                use_container_width=True,
-                help="You can only export once per 24 hours."
             )
         else:
             st.button(
