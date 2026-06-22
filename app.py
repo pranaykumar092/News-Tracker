@@ -13,7 +13,6 @@ LOCK_FILE = ".csv_lock.json"
 
 # ── 24-hour lock helpers ──────────────────────────────────────
 def can_export():
-    """Returns (allowed: bool, time_remaining: str | None)"""
     try:
         if os.path.exists(LOCK_FILE):
             with open(LOCK_FILE, "r") as f:
@@ -34,12 +33,46 @@ def mark_exported():
         json.dump({"last_exported": datetime.now().isoformat()}, f)
 
 def build_csv(rows):
-    """rows = list of [source_news, ai_headline, extension]"""
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["Source News", "News Headline", "Extension"])
     writer.writerows(rows)
     return output.getvalue().encode("utf-8")
+
+def render_export_button(slot):
+    """Render the export button into a placeholder slot after data is ready."""
+    allowed, time_left = can_export()
+    has_data = len(st.session_state.csv_rows) > 0
+
+    with slot:
+        if allowed and has_data:
+            fname = (
+                f"newsdrum_{st.session_state.active_source.replace(' ', '_')}_"
+                f"{datetime.now().strftime('%Y%m%d')}.csv"
+            )
+            csv_bytes = build_csv(st.session_state.csv_rows)
+            if st.download_button(
+                label="📥 Export CSV",
+                data=csv_bytes,
+                file_name=fname,
+                mime="text/csv",
+                use_container_width=True,
+            ):
+                mark_exported()
+        elif not allowed:
+            st.button(
+                f"⏳ {time_left}",
+                disabled=True,
+                use_container_width=True,
+                help="You can only export one CSV per 24 hours."
+            )
+        else:
+            st.button(
+                "📥 Export CSV",
+                disabled=True,
+                use_container_width=True,
+                help="Fetch news first to enable export."
+            )
 
 # ── Session state init ────────────────────────────────────────
 if "active_source" not in st.session_state:
@@ -117,17 +150,6 @@ st.markdown("""
         background-color: #c2410c !important;
         color: #ffffff !important;
     }
-
-    /* Disabled export button */
-    .export-disabled button {
-        background-color: #94a3b8 !important;
-        color: #ffffff !important;
-        border: none !important;
-        font-weight: 600 !important;
-        width: 100% !important;
-        border-radius: 6px !important;
-        cursor: not-allowed !important;
-    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -153,52 +175,14 @@ if selected_source != st.session_state.active_source or refresh_clicked:
     st.session_state.active_source = selected_source
     st.session_state.csv_rows = []
 
-# ── Header row: Live Feed title + Export button ───────────────
+# ── Header row: title left, button placeholder right ─────────
+# KEY FIX: btn_slot is a placeholder filled AFTER the news loop,
+# so it sees the fully-populated csv_rows instead of an empty list.
 header_col, btn_col = st.columns([5, 1])
-
 with header_col:
     st.subheader(f"⚡ Live Feed: {selected_source}")
 
-with btn_col:
-    allowed, time_left = can_export()
-    has_data = len(st.session_state.csv_rows) > 0
-
-    if allowed and has_data:
-        fname = (
-            f"newsdrum_{selected_source.replace(' ', '_')}_"
-            f"{datetime.now().strftime('%Y%m%d')}.csv"
-        )
-        csv_bytes = build_csv(st.session_state.csv_rows)
-        downloaded = st.download_button(
-            label="📥 Export CSV",
-            data=csv_bytes,
-            file_name=fname,
-            mime="text/csv",
-            use_container_width=True,
-        )
-        if downloaded:
-            mark_exported()
-
-    elif not allowed:
-        st.markdown('<div class="export-disabled">', unsafe_allow_html=True)
-        st.button(
-            f"⏳ {time_left}",
-            disabled=True,
-            use_container_width=True,
-            help="You can only export one CSV per 24 hours."
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    else:
-        # News not loaded yet
-        st.markdown('<div class="export-disabled">', unsafe_allow_html=True)
-        st.button(
-            "📥 Export CSV",
-            disabled=True,
-            use_container_width=True,
-            help="Fetch news first to enable export."
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
+btn_slot = btn_col.empty()  # placeholder — filled at the bottom
 
 # ── Main content ──────────────────────────────────────────────
 if selected_source:
@@ -227,17 +211,16 @@ if selected_source:
                 col2_data = rewrite_with_groq(item["title"], item["description"])
                 col3_data = rewrite_with_groq(item["title"], item["description"])
 
-            # Accumulate for CSV (using col1 — Gemini slot)
-            # Only add once per item (guard against duplicate reruns)
+            # Accumulate for CSV — guard against duplicate reruns
             already_added = any(
                 row[0] == item["title"]
                 for row in st.session_state.csv_rows
             )
             if not already_added:
                 st.session_state.csv_rows.append([
-                    item["title"],          # Source News
-                    col1_data["headline"],  # News Headline
-                    col1_data["body"],      # Extension / Summary
+                    item["title"],           # Source News  (original RSS title)
+                    col1_data["headline"],   # News Headline (AI-generated)
+                    col1_data["body"],       # Extension     (AI-generated body)
                 ])
 
             col1, col2, col3 = st.columns(3)
@@ -264,6 +247,9 @@ if selected_source:
                             key=f"copy_{idx}_{key_suffix}"
                         )
 
-            render_native_card("Gemini 2.5 Flash",   col1_data, col1, "1")
-            render_native_card("Nvidia Nemotron 70B", col2_data, col2, "2")
-            render_native_card("Groq Llama 3.1",      col3_data, col3, "3")
+            render_native_card("Gemini 2.5 Flash",    col1_data, col1, "1")
+            render_native_card("Nvidia Nemotron 70B",  col2_data, col2, "2")
+            render_native_card("Groq Llama 3.1",       col3_data, col3, "3")
+
+# ── Fill the button placeholder now that csv_rows is populated ─
+render_export_button(btn_slot)
