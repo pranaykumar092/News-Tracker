@@ -2,8 +2,10 @@ import streamlit as st
 import os
 import json
 import io
-import csv
 from datetime import datetime, timedelta
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
 from st_copy_to_clipboard import st_copy_to_clipboard
 from utils import RSS_FEEDS, fetch_top_stories, rewrite_with_groq, rewrite_with_gemini, rewrite_with_nemotron
 
@@ -32,15 +34,74 @@ def mark_exported():
     with open(LOCK_FILE, "w") as f:
         json.dump({"last_exported": datetime.now().isoformat()}, f)
 
-def build_csv(rows):
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["Source News", "News Headline", "Extension"])
-    writer.writerows(rows)
-    return output.getvalue().encode("utf-8")
+def build_excel(rows):
+    """
+    Build an xlsx file with:
+    - Bold header row
+    - Text wrap + top-align on every cell
+    - Column widths auto-fitted to content (capped at 80 chars)
+    - Row heights scaled to content length
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Newsdrum Export"
+
+    headers = ["Source News", "News Headline", "Extension"]
+    col_widths = [len(h) for h in headers]
+
+    # ── Thin border ───────────────────────────────────────────
+    def thin():
+        s = Side(style="thin", color="CCCCCC")
+        return Border(left=s, right=s, top=s, bottom=s)
+
+    # ── Header row ────────────────────────────────────────────
+    for c, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=c, value=h)
+        cell.font      = Font(name="Arial", bold=True, size=11, color="FFFFFF")
+        cell.fill      = PatternFill("solid", start_color="1F2D3D")
+        cell.alignment = Alignment(horizontal="center", vertical="center",
+                                   wrap_text=True)
+        cell.border    = thin()
+    ws.row_dimensions[1].height = 22
+
+    # ── Data rows ─────────────────────────────────────────────
+    for r, row in enumerate(rows, 2):
+        max_lines = 1
+        for c, val in enumerate(row, 1):
+            text = str(val) if val else ""
+            cell = ws.cell(row=r, column=c, value=text)
+            cell.font      = Font(name="Arial", size=10)
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            cell.border    = thin()
+
+            # Track widest content per column (cap at 80)
+            longest_line = max((len(line) for line in text.split("\n")), default=0)
+            col_widths[c - 1] = min(80, max(col_widths[c - 1], longest_line))
+
+            # Estimate how many lines this cell will wrap to (at col width chars)
+            cap = col_widths[c - 1] if col_widths[c - 1] > 0 else 1
+            lines = sum(
+                max(1, (len(line) + cap - 1) // cap)
+                for line in text.split("\n")
+            )
+            max_lines = max(max_lines, lines)
+
+        # Row height: ~15pt per wrapped line, min 18, max 400
+        ws.row_dimensions[r].height = min(400, max(18, max_lines * 15))
+
+    # ── Apply column widths ───────────────────────────────────
+    for i, w in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w + 4  # +4 padding
+
+    # ── Freeze header row ─────────────────────────────────────
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
 
 def render_export_button(slot):
-    """Render the export button into a placeholder slot after data is ready."""
     allowed, time_left = can_export()
     has_data = len(st.session_state.csv_rows) > 0
 
@@ -48,14 +109,14 @@ def render_export_button(slot):
         if allowed and has_data:
             fname = (
                 f"newsdrum_{st.session_state.active_source.replace(' ', '_')}_"
-                f"{datetime.now().strftime('%Y%m%d')}.csv"
+                f"{datetime.now().strftime('%Y%m%d')}.xlsx"
             )
-            csv_bytes = build_csv(st.session_state.csv_rows)
+            excel_bytes = build_excel(st.session_state.csv_rows)
             if st.download_button(
-                label="📥 Export CSV",
-                data=csv_bytes,
+                label="📥 Export Excel",
+                data=excel_bytes,
                 file_name=fname,
-                mime="text/csv",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             ):
                 mark_exported()
@@ -64,11 +125,11 @@ def render_export_button(slot):
                 f"⏳ {time_left}",
                 disabled=True,
                 use_container_width=True,
-                help="You can only export one CSV per 24 hours."
+                help="You can only export once per 24 hours."
             )
         else:
             st.button(
-                "📥 Export CSV",
+                "📥 Export Excel",
                 disabled=True,
                 use_container_width=True,
                 help="Fetch news first to enable export."
@@ -137,7 +198,7 @@ st.markdown("""
         margin-bottom: 15px;
     }
 
-    /* Orange Export CSV button */
+    /* Orange Export button */
     [data-testid="stDownloadButton"] > button {
         background-color: #ea580c !important;
         color: #ffffff !important;
@@ -170,19 +231,17 @@ with st.sidebar:
         label_visibility="collapsed"
     )
 
-# ── Reset CSV rows when source changes or refresh clicked ─────
+# ── Reset when source changes or refresh clicked ──────────────
 if selected_source != st.session_state.active_source or refresh_clicked:
     st.session_state.active_source = selected_source
     st.session_state.csv_rows = []
 
 # ── Header row: title left, button placeholder right ─────────
-# KEY FIX: btn_slot is a placeholder filled AFTER the news loop,
-# so it sees the fully-populated csv_rows instead of an empty list.
 header_col, btn_col = st.columns([5, 1])
 with header_col:
     st.subheader(f"⚡ Live Feed: {selected_source}")
 
-btn_slot = btn_col.empty()  # placeholder — filled at the bottom
+btn_slot = btn_col.empty()   # filled after the news loop
 
 # ── Main content ──────────────────────────────────────────────
 if selected_source:
@@ -211,16 +270,16 @@ if selected_source:
                 col2_data = rewrite_with_groq(item["title"], item["description"])
                 col3_data = rewrite_with_groq(item["title"], item["description"])
 
-            # Accumulate for CSV — guard against duplicate reruns
+            # Accumulate for export — guard against duplicates on rerun
             already_added = any(
                 row[0] == item["title"]
                 for row in st.session_state.csv_rows
             )
             if not already_added:
                 st.session_state.csv_rows.append([
-                    item["title"],           # Source News  (original RSS title)
-                    col1_data["headline"],   # News Headline (AI-generated)
-                    col1_data["body"],       # Extension     (AI-generated body)
+                    item["title"],          # Source News
+                    col1_data["headline"],  # News Headline
+                    col1_data["body"],      # Extension
                 ])
 
             col1, col2, col3 = st.columns(3)
@@ -251,5 +310,5 @@ if selected_source:
             render_native_card("Nvidia Nemotron 70B",  col2_data, col2, "2")
             render_native_card("Groq Llama 3.1",       col3_data, col3, "3")
 
-# ── Fill the button placeholder now that csv_rows is populated ─
+# ── Fill button slot now that csv_rows is fully populated ─────
 render_export_button(btn_slot)
