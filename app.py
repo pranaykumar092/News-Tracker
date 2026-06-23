@@ -23,7 +23,7 @@ def build_excel(rows):
     ws = wb.active
     ws.title = "Newsdrum Export"
 
-    headers = ["Source News", "News Headline", "Extension"]
+    headers = ["Source News", "Extension 1 (Gemini 2.5 Flash)", "Extension 2 (Nvidia Nemotron 70B)", "Extension 3 (Groq Llama 3.1)"]
     col_widths = [len(h) for h in headers]
 
     # ── Thin border ───────────────────────────────────────────
@@ -244,10 +244,17 @@ if selected_source:
                 for row in st.session_state.csv_rows
             )
             if not already_added:
+                def make_payload(data):
+                    return (
+                        f"TITLE: {data['headline']}\n"
+                        f"STRAPLINE: {data['strapline']}\n\n"
+                        f"{data['body']}"
+                    )
                 st.session_state.csv_rows.append([
-                    item["title"],          # Source News
-                    col1_data["headline"],  # News Headline
-                    col1_data["body"],      # Extension
+                    item["title"],            # Source News
+                    make_payload(col1_data),  # Extension 1 — Gemini 2.5 Flash
+                    make_payload(col2_data),  # Extension 2 — Nvidia Nemotron 70B
+                    make_payload(col3_data),  # Extension 3 — Groq Llama 3.1
                 ])
 
             col1, col2, col3 = st.columns(3)
