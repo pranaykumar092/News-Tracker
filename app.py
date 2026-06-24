@@ -85,7 +85,7 @@ def render_export_button(slot):
         if has_data:
             count = len(st.session_state.csv_rows)
             fname = (
-                f"newsdrum_all_sources_"
+                f"newsdrum_"
                 f"{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
             )
             excel_bytes = build_excel(st.session_state.csv_rows)
