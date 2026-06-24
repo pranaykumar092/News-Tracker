@@ -220,15 +220,19 @@ st.markdown("""
         background-color: #c2410c !important;
     }
 
-    /* Black "Common Across Sources" button (targeted by its key) */
-    .st-key-trending_btn button {
+    /* Black "Trending" button — high specificity so it overrides the
+       generic secondary-button styling defined above. */
+    .st-key-trending_btn button,
+    .st-key-trending_btn button[kind="secondary"],
+    div[data-testid="stButton"].st-key-trending_btn button {
         background-color: #000000 !important;
         color: #ffffff !important;
         border: none !important;
         font-weight: 700 !important;
         border-radius: 6px !important;
     }
-    .st-key-trending_btn button:hover {
+    .st-key-trending_btn button:hover,
+    .st-key-trending_btn button[kind="secondary"]:hover {
         background-color: #1f1f1f !important;
         color: #ffffff !important;
     }
