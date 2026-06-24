@@ -1,5 +1,7 @@
 import streamlit as st
 import io
+import re
+from collections import Counter
 from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
@@ -9,16 +11,22 @@ from utils import RSS_FEEDS, fetch_top_stories, rewrite_with_groq, rewrite_with_
 
 st.set_page_config(page_title="Newsdrum AI Aggregator Panel", layout="wide")
 
+# ── Session state init ────────────────────────────────────────
+if "active_source" not in st.session_state:
+    st.session_state.active_source = None
+if "csv_rows" not in st.session_state:
+    st.session_state.csv_rows = []
+if "publish_state" not in st.session_state:
+    st.session_state.publish_state = "idle"   # idle | loading | ready
+if "publish_excel" not in st.session_state:
+    st.session_state.publish_excel = None
+if "trending_state" not in st.session_state:
+    st.session_state.trending_state = "idle"  # idle | loading | ready
+if "trending_results" not in st.session_state:
+    st.session_state.trending_results = []
 
-
+# ── Excel builder ─────────────────────────────────────────────
 def build_excel(rows):
-    """
-    Build an xlsx file with:
-    - Bold header row
-    - Text wrap + top-align on every cell
-    - Column widths auto-fitted to content (capped at 80 chars)
-    - Row heights scaled to content length
-    """
     wb = Workbook()
     ws = wb.active
     ws.title = "Newsdrum Export"
@@ -26,22 +34,18 @@ def build_excel(rows):
     headers = ["Source News", "News Headline", "News Description", "Newsdrum Version"]
     col_widths = [len(h) for h in headers]
 
-    # ── Thin border ───────────────────────────────────────────
     def thin():
         s = Side(style="thin", color="CCCCCC")
         return Border(left=s, right=s, top=s, bottom=s)
 
-    # ── Header row ────────────────────────────────────────────
     for c, h in enumerate(headers, 1):
         cell = ws.cell(row=1, column=c, value=h)
         cell.font      = Font(name="Arial", bold=True, size=11, color="FFFFFF")
         cell.fill      = PatternFill("solid", start_color="1F2D3D")
-        cell.alignment = Alignment(horizontal="center", vertical="center",
-                                   wrap_text=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border    = thin()
     ws.row_dimensions[1].height = 22
 
-    # ── Data rows ─────────────────────────────────────────────
     for r, row in enumerate(rows, 2):
         max_lines = 1
         for c, val in enumerate(row, 1):
@@ -50,27 +54,15 @@ def build_excel(rows):
             cell.font      = Font(name="Arial", size=10)
             cell.alignment = Alignment(vertical="top", wrap_text=True)
             cell.border    = thin()
-
-            # Track widest content per column (cap at 80)
-            longest_line = max((len(line) for line in text.split("\n")), default=0)
-            col_widths[c - 1] = min(80, max(col_widths[c - 1], longest_line))
-
-            # Estimate how many lines this cell will wrap to (at col width chars)
-            cap = col_widths[c - 1] if col_widths[c - 1] > 0 else 1
-            lines = sum(
-                max(1, (len(line) + cap - 1) // cap)
-                for line in text.split("\n")
-            )
+            longest_line   = max((len(line) for line in text.split("\n")), default=0)
+            col_widths[c-1] = min(80, max(col_widths[c-1], longest_line))
+            cap   = col_widths[c-1] if col_widths[c-1] > 0 else 1
+            lines = sum(max(1, (len(line)+cap-1)//cap) for line in text.split("\n"))
             max_lines = max(max_lines, lines)
-
-        # Row height: ~15pt per wrapped line, min 18, max 400
         ws.row_dimensions[r].height = min(400, max(18, max_lines * 15))
 
-    # ── Apply column widths ───────────────────────────────────
     for i, w in enumerate(col_widths, 1):
-        ws.column_dimensions[get_column_letter(i)].width = w + 4  # +4 padding
-
-    # ── Freeze header row ─────────────────────────────────────
+        ws.column_dimensions[get_column_letter(i)].width = w + 4
     ws.freeze_panes = "A2"
 
     buf = io.BytesIO()
@@ -78,37 +70,84 @@ def build_excel(rows):
     buf.seek(0)
     return buf.getvalue()
 
-def render_export_button(slot):
-    has_data = len(st.session_state.csv_rows) > 0
+def make_payload(data):
+    return (
+        f"TITLE: {data['headline']}\n"
+        f"STRAPLINE: {data['strapline']}\n\n"
+        f"{data['body']}"
+    )
 
-    with slot:
-        if has_data:
-            count = len(st.session_state.csv_rows)
-            fname = (
-                f"newsdrum_"
-                f"{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-            )
-            excel_bytes = build_excel(st.session_state.csv_rows)
-            st.download_button(
-                label=f"📤 Publish ({count})",
-                data=excel_bytes,
-                file_name=fname,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-        else:
-            st.button(
-                "📤 Publish",
-                disabled=True,
-                use_container_width=True,
-                help="Fetch news first to enable publish."
-            )
+# ── Common-story detection ────────────────────────────────────
+# Words too generic to help identify a story — ignored when matching.
+STOPWORDS = {
+    "the","a","an","in","on","at","of","for","to","and","or","but","with",
+    "is","are","was","were","be","been","as","by","from","that","this","it",
+    "his","her","its","their","they","he","she","we","you","not","no","new",
+    "after","before","over","under","into","out","up","down","says","say",
+    "said","will","has","have","had","amid","among","more","than","what",
+    "who","how","why","when","where","amp","get","gets","may","can","could",
+    "would","should","his","s","t","vs","top","day","year","years","news"
+}
 
-# ── Session state init ────────────────────────────────────────
-if "active_source" not in st.session_state:
-    st.session_state.active_source = None
-if "csv_rows" not in st.session_state:
-    st.session_state.csv_rows = []
+def _keywords(title):
+    """Reduce a headline to its set of meaningful keywords."""
+    words = re.findall(r"[a-z0-9]+", title.lower())
+    return {w for w in words if w not in STOPWORDS and len(w) > 2}
+
+def _similarity(kw1, kw2):
+    """Jaccard similarity between two keyword sets (0.0 – 1.0)."""
+    if not kw1 or not kw2:
+        return 0.0
+    return len(kw1 & kw2) / len(kw1 | kw2)
+
+def find_common_stories(threshold=0.22, top_n=5):
+    """
+    Fetch every source, group headlines that describe the same event,
+    and rank those groups by how many distinct sources cover them.
+    Most-covered story is first, least-covered (of the top N) is last.
+    """
+    all_stories = []
+    sources = list(RSS_FEEDS.keys())
+    progress = st.progress(0, text="Starting…")
+
+    for i, source in enumerate(sources):
+        progress.progress(i / len(sources), text=f"Scanning {source}…")
+        for item in fetch_top_stories(source, limit=5):
+            all_stories.append({
+                "title": item["title"],
+                "source": source,
+                "link": item["link"],
+                "keywords": _keywords(item["title"]),
+            })
+    progress.progress(1.0, text="Analyzing overlap…")
+
+    # Greedy clustering: place each story into the first matching cluster.
+    clusters = []
+    for story in all_stories:
+        placed = False
+        for cluster in clusters:
+            if _similarity(story["keywords"], cluster["keywords"]) >= threshold:
+                cluster["stories"].append(story)
+                cluster["sources"].add(story["source"])
+                cluster["keywords"] |= story["keywords"]
+                placed = True
+                break
+        if not placed:
+            clusters.append({
+                "keywords": set(story["keywords"]),
+                "stories": [story],
+                "sources": {story["source"]},
+                "title": story["title"],   # representative headline
+            })
+
+    # Rank: most distinct sources first, then largest cluster.
+    ranked = sorted(
+        clusters,
+        key=lambda c: (len(c["sources"]), len(c["stories"])),
+        reverse=True,
+    )
+    progress.empty()
+    return ranked[:top_n]
 
 # ── CSS ───────────────────────────────────────────────────────
 st.markdown("""
@@ -128,46 +167,25 @@ st.markdown("""
     [data-testid="stExpander"] div { color: #334155 !important; }
 
     .model-badge {
-        font-size: 12px;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        margin-bottom: 10px;
-        color: #64748b;
+        font-size: 12px; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 1px; margin-bottom: 10px; color: #64748b;
     }
     .meta-headline {
-        font-size: 18px;
-        font-weight: 800;
-        color: #0f172a;
-        line-height: 1.3;
-        margin-bottom: 12px;
+        font-size: 18px; font-weight: 800; color: #0f172a;
+        line-height: 1.3; margin-bottom: 12px;
     }
     .meta-strapline {
-        font-size: 14px;
-        color: #ea580c;
-        font-weight: 600;
-        line-height: 1.4;
-        border-left: 3px solid #ea580c;
-        padding-left: 10px;
-        margin-bottom: 12px;
+        font-size: 14px; color: #ea580c; font-weight: 600;
+        line-height: 1.4; border-left: 3px solid #ea580c;
+        padding-left: 10px; margin-bottom: 12px;
     }
-    .news-body {
-        font-size: 14px;
-        color: #334155;
-        line-height: 1.6;
-        word-wrap: break-word;
-    }
+    .news-body { font-size: 14px; color: #334155; line-height: 1.6; word-wrap: break-word; }
     .source-banner {
-        background: #e2e8f0;
-        padding: 10px 15px;
-        border-radius: 6px;
-        font-size: 14px;
-        font-weight: 600;
-        color: #334155;
-        margin-bottom: 15px;
+        background: #e2e8f0; padding: 10px 15px; border-radius: 6px;
+        font-size: 14px; font-weight: 600; color: #334155; margin-bottom: 15px;
     }
 
-    /* Orange Export button */
+    /* Orange Publish button */
     [data-testid="stDownloadButton"] > button {
         background-color: #ea580c !important;
         color: #ffffff !important;
@@ -178,10 +196,63 @@ st.markdown("""
     }
     [data-testid="stDownloadButton"] > button:hover {
         background-color: #c2410c !important;
+    }
+
+    /* Orange regular button (Publish trigger) */
+    div[data-testid="stButton"] > button[kind="secondary"] {
+        background-color: #ea580c !important;
+        color: #ffffff !important;
+        border: none !important;
+        font-weight: 700 !important;
+        border-radius: 6px !important;
+    }
+    div[data-testid="stButton"] > button[kind="secondary"]:hover {
+        background-color: #c2410c !important;
+    }
+
+    /* Black "Common Across Sources" button (targeted by its key) */
+    .st-key-trending_btn button {
+        background-color: #000000 !important;
+        color: #ffffff !important;
+        border: none !important;
+        font-weight: 700 !important;
+        border-radius: 6px !important;
+    }
+    .st-key-trending_btn button:hover {
+        background-color: #1f1f1f !important;
         color: #ffffff !important;
     }
-    </style>
-""", unsafe_allow_html=True)
+
+    /* Ranked common-story card */
+    .rank-card {
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-left: 5px solid #000000;
+        border-radius: 8px;
+        padding: 14px 18px;
+        margin-bottom: 12px;
+    }
+    .rank-num {
+        display: inline-block;
+        background: #000000;
+        color: #ffffff;
+        font-weight: 800;
+        font-size: 14px;
+        width: 28px;
+        height: 28px;
+        line-height: 28px;
+        text-align: center;
+        border-radius: 50%;
+        margin-right: 10px;
+    }
+    .rank-title { font-size: 16px; font-weight: 700; color: #0f172a; }
+    .rank-meta  { font-size: 13px; color: #64748b; margin-top: 6px; }
+    .rank-badge {
+        display: inline-block; background: #ea580c; color: #fff;
+        font-size: 12px; font-weight: 700; padding: 2px 10px;
+        border-radius: 12px; margin-left: 8px;
+    }
+    </style>""", unsafe_allow_html=True)
 
 # ── Sidebar ───────────────────────────────────────────────────
 with st.sidebar:
@@ -193,6 +264,11 @@ with st.sidebar:
         use_container_width=True,
         type="primary"
     )
+    trending_clicked = st.button(
+        "🏆 Common Across Sources",
+        use_container_width=True,
+        key="trending_btn",
+    )
     st.write("### TRACKED SOURCES")
     selected_source = st.radio(
         "Select News Portal",
@@ -200,91 +276,153 @@ with st.sidebar:
         label_visibility="collapsed"
     )
 
-# ── Track active source; only wipe rows on manual refresh ────
 st.session_state.active_source = selected_source
 if refresh_clicked:
-    st.session_state.csv_rows = []
+    st.session_state.publish_state = "idle"
+    st.session_state.publish_excel = None
+    st.session_state.trending_state = "idle"   # return to normal feed
 
-# ── Header row: title left, button placeholder right ─────────
+if trending_clicked:
+    st.session_state.trending_state = "loading"
+    st.rerun()
+
+# ── Header row ────────────────────────────────────────────────
 header_col, btn_col = st.columns([5, 1])
 with header_col:
     st.subheader(f"⚡ Live Feed: {selected_source}")
 
-btn_slot = btn_col.empty()   # filled after the news loop
+btn_slot = btn_col.empty()   # filled after any heavy work below
 
-# ── Main content ──────────────────────────────────────────────
-if selected_source:
-    with st.spinner(f"Intercepting top stories from {selected_source}..."):
-        raw_items = fetch_top_stories(selected_source, limit=5)
+# ── PUBLISH: loading phase — fetch ALL sources + rewrite ──────
+if st.session_state.publish_state == "loading":
+    all_rows = []
+    sources  = list(RSS_FEEDS.keys())
+    st.info("📤 Compiling all sources for publish…")
+    progress_bar = st.progress(0, text="Starting…")
 
-    if not raw_items:
-        st.error("Connection blocked by source firewall. Try a different outlet.")
+    for i, source in enumerate(sources):
+        progress_bar.progress((i) / len(sources), text=f"Fetching {source}…")
+        items = fetch_top_stories(source, limit=5)
+        for item in items:
+            data = rewrite_with_gemini(item["title"], item["description"])
+            all_rows.append([
+                source,
+                data["headline"],
+                data["body"],
+                make_payload(data),
+            ])
+
+    progress_bar.progress(1.0, text="Done!")
+    st.session_state.publish_excel = build_excel(all_rows)
+    st.session_state.publish_state = "ready"
+    st.rerun()
+
+# ── Render Publish button into slot ──────────────────────────
+with btn_slot:
+    if st.session_state.publish_state == "idle":
+        if st.button("📤 Publish", use_container_width=True):
+            st.session_state.publish_state = "loading"
+            st.rerun()
+
+    elif st.session_state.publish_state == "loading":
+        st.button("⏳ Preparing…", disabled=True, use_container_width=True)
+
+    elif st.session_state.publish_state == "ready":
+        fname = f"newsdrum_all_sources_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        st.download_button(
+            label="📥 Download",
+            data=st.session_state.publish_excel,
+            file_name=fname,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+# ── TRENDING: loading phase — scan all sources for common stories ─
+if st.session_state.trending_state == "loading":
+    st.subheader("🏆 Top Stories Common Across All Sources")
+    st.info("Scanning every source and measuring how widely each story is covered…")
+    results = find_common_stories(threshold=0.22, top_n=5)
+    st.session_state.trending_results = results
+    st.session_state.trending_state = "ready"
+    st.rerun()
+
+# ── TRENDING: results view ────────────────────────────────────
+if st.session_state.trending_state == "ready":
+    head_l, head_r = st.columns([5, 1])
+    with head_l:
+        st.subheader("🏆 Top Stories Common Across All Sources")
+    with head_r:
+        if st.button("← Back to Feed", use_container_width=True):
+            st.session_state.trending_state = "idle"
+            st.rerun()
+
+    st.caption("Ranked by how many different news outlets are covering the same story — #1 is the most widely covered.")
+
+    results = st.session_state.trending_results
+    if not results:
+        st.warning("Couldn't gather enough stories to compare. Try again in a moment.")
     else:
-        for idx, item in enumerate(raw_items):
-            st.markdown("---")
-
+        for rank, cluster in enumerate(results, 1):
+            source_count = len(cluster["sources"])
+            sources_list = ", ".join(sorted(cluster["sources"]))
             st.markdown(
-                f'<div class="source-banner">'
-                f'📦 Source: {selected_source} | 🕒 {item["published"]}'
+                f'<div class="rank-card">'
+                f'<span class="rank-num">{rank}</span>'
+                f'<span class="rank-title">{cluster["title"]}</span>'
+                f'<span class="rank-badge">{source_count} '
+                f'{"sources" if source_count != 1 else "source"}</span>'
+                f'<div class="rank-meta">📰 Covered by: {sources_list}</div>'
                 f'</div>',
                 unsafe_allow_html=True
             )
 
-            with st.expander(f"Original Article: {item['title']}"):
-                st.markdown(item['description'], unsafe_allow_html=True)
-                st.link_button("🔗 View Original Source", item["link"])
+# ── Main live feed (hidden while publishing or viewing trending) ─
+if st.session_state.publish_state != "loading" and st.session_state.trending_state == "idle":
+    if selected_source:
+        with st.spinner(f"Intercepting top stories from {selected_source}..."):
+            raw_items = fetch_top_stories(selected_source, limit=5)
 
-            with st.spinner("AI is writing (Token Saver Mode active)..."):
-                col1_data = rewrite_with_groq(item["title"], item["description"])
-                col2_data = rewrite_with_groq(item["title"], item["description"])
-                col3_data = rewrite_with_groq(item["title"], item["description"])
+        if not raw_items:
+            st.error("Connection blocked by source firewall. Try a different outlet.")
+        else:
+            for idx, item in enumerate(raw_items):
+                st.markdown("---")
+                st.markdown(
+                    f'<div class="source-banner">'
+                    f'📦 Source: {selected_source} | 🕒 {item["published"]}'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
 
-            # Accumulate for export — guard against duplicates on rerun
-            already_added = any(
-                row[0] == selected_source and row[1] == col1_data["headline"]
-                for row in st.session_state.csv_rows
-            )
-            if not already_added:
-                def make_payload(data):
-                    return (
-                        f"TITLE: {data['headline']}\n"
-                        f"STRAPLINE: {data['strapline']}\n\n"
-                        f"{data['body']}"
-                    )
-                st.session_state.csv_rows.append([
-                    selected_source,            # Source News (e.g. NDTV, Moneycontrol)
-                    col1_data["headline"],      # News Headline — Gemini 2.5 Flash
-                    col1_data["body"],          # News Description — Gemini 2.5 Flash
-                    make_payload(col1_data),    # Newsdrum Version — full TITLE + STRAPLINE + BODY
-                ])
+                with st.expander(f"Original Article: {item['title']}"):
+                    st.markdown(item['description'], unsafe_allow_html=True)
+                    st.link_button("🔗 View Original Source", item["link"])
 
-            col1, col2, col3 = st.columns(3)
+                with st.spinner("AI is writing…"):
+                    col1_data = rewrite_with_groq(item["title"], item["description"])
+                    col2_data = rewrite_with_groq(item["title"], item["description"])
+                    col3_data = rewrite_with_groq(item["title"], item["description"])
 
-            def render_native_card(model_label, data, column_ref, key_suffix):
-                with column_ref:
-                    with st.container(border=True):
-                        st.markdown(f"""
-                            <div class="model-badge">{model_label}</div>
-                            <div class="meta-headline">{data['headline']}</div>
-                            <div class="meta-strapline">{data['strapline']}</div>
-                            <div class="news-body">{data['body']}</div>
-                            <br>
-                        """, unsafe_allow_html=True)
-                        payload = (
-                            f"TITLE: {data['headline']}\n"
-                            f"STRAPLINE: {data['strapline']}\n\n"
-                            f"{data['body']}"
-                        )
-                        st_copy_to_clipboard(
-                            payload,
-                            before_copy_label=f"📋 Copy {model_label}",
-                            after_copy_label="✅ Copied!",
-                            key=f"copy_{idx}_{key_suffix}"
-                        )
+                col1, col2, col3 = st.columns(3)
 
-            render_native_card("Gemini 2.5 Flash",    col1_data, col1, "1")
-            render_native_card("Nvidia Nemotron 70B",  col2_data, col2, "2")
-            render_native_card("Groq Llama 3.1",       col3_data, col3, "3")
+                def render_native_card(model_label, data, column_ref, key_suffix):
+                    with column_ref:
+                        with st.container(border=True):
+                            st.markdown(f"""
+                                <div class="model-badge">{model_label}</div>
+                                <div class="meta-headline">{data['headline']}</div>
+                                <div class="meta-strapline">{data['strapline']}</div>
+                                <div class="news-body">{data['body']}</div>
+                                <br>
+                            """, unsafe_allow_html=True)
+                            payload = make_payload(data)
+                            st_copy_to_clipboard(
+                                payload,
+                                before_copy_label=f"📋 Copy {model_label}",
+                                after_copy_label="✅ Copied!",
+                                key=f"copy_{idx}_{key_suffix}"
+                            )
 
-# ── Fill button slot now that csv_rows is fully populated ─────
-render_export_button(btn_slot)
+                render_native_card("Gemini 2.5 Flash",    col1_data, col1, "1")
+                render_native_card("Nvidia Nemotron 70B",  col2_data, col2, "2")
+                render_native_card("Groq Llama 3.1",       col3_data, col3, "3")
