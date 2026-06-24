@@ -100,7 +100,7 @@ def _similarity(kw1, kw2):
         return 0.0
     return len(kw1 & kw2) / len(kw1 | kw2)
 
-def find_common_stories(threshold=0.22, top_n=5):
+def find_common_stories(threshold=0.18, top_n=5):
     """
     Fetch every source, group headlines that describe the same event,
     and rank those groups by how many distinct sources cover them.
@@ -115,30 +115,40 @@ def find_common_stories(threshold=0.22, top_n=5):
         for item in fetch_top_stories(source, limit=5):
             all_stories.append({
                 "title": item["title"],
+                "description": item.get("description", ""),
                 "source": source,
                 "link": item["link"],
                 "keywords": _keywords(item["title"]),
             })
     progress.progress(1.0, text="Analyzing overlap…")
 
-    # Greedy clustering: place each story into the first matching cluster.
+    # Clustering: drop each story into the BEST matching cluster (the one
+    # with the highest similarity above the threshold), not just the first.
     clusters = []
     for story in all_stories:
-        placed = False
+        best_cluster = None
+        best_score = threshold
         for cluster in clusters:
-            if _similarity(story["keywords"], cluster["keywords"]) >= threshold:
-                cluster["stories"].append(story)
-                cluster["sources"].add(story["source"])
-                cluster["keywords"] |= story["keywords"]
-                placed = True
-                break
-        if not placed:
+            score = _similarity(story["keywords"], cluster["keywords"])
+            if score >= best_score:
+                best_score = score
+                best_cluster = cluster
+        if best_cluster is not None:
+            best_cluster["stories"].append(story)
+            best_cluster["sources"].add(story["source"])
+            best_cluster["keywords"] |= story["keywords"]
+        else:
             clusters.append({
                 "keywords": set(story["keywords"]),
                 "stories": [story],
                 "sources": {story["source"]},
-                "title": story["title"],   # representative headline
             })
+
+    # Pick the richest headline+description in each cluster as representative.
+    for cluster in clusters:
+        rep = max(cluster["stories"], key=lambda s: len(s["description"]))
+        cluster["title"] = rep["title"]
+        cluster["description"] = rep["description"]
 
     # Rank: most distinct sources first, then largest cluster.
     ranked = sorted(
@@ -247,6 +257,14 @@ st.markdown("""
     }
     .rank-title { font-size: 16px; font-weight: 700; color: #0f172a; }
     .rank-meta  { font-size: 13px; color: #64748b; margin-top: 6px; }
+    .rank-model {
+        font-size: 11px; font-weight: 700; letter-spacing: 1px;
+        color: #64748b; text-transform: uppercase; margin-top: 12px;
+    }
+    .rank-desc {
+        font-size: 14px; color: #334155; line-height: 1.6;
+        margin-top: 4px;
+    }
     .rank-badge {
         display: inline-block; background: #ea580c; color: #fff;
         font-size: 12px; font-weight: 700; padding: 2px 10px;
@@ -265,7 +283,7 @@ with st.sidebar:
         type="primary"
     )
     trending_clicked = st.button(
-        "🏆 Common Across Sources",
+        "🔥 Trending",
         use_container_width=True,
         key="trending_btn",
     )
@@ -339,9 +357,22 @@ with btn_slot:
 
 # ── TRENDING: loading phase — scan all sources for common stories ─
 if st.session_state.trending_state == "loading":
-    st.subheader("🏆 Top Stories Common Across All Sources")
+    st.subheader("🔥 Trending Across All Sources")
     st.info("Scanning every source and measuring how widely each story is covered…")
-    results = find_common_stories(threshold=0.22, top_n=5)
+    results = find_common_stories(threshold=0.18, top_n=5)
+
+    # Generate a Gemini 2.5 Flash description for each trending story.
+    if results:
+        gen = st.progress(0, text="Writing summaries with Gemini 2.5 Flash…")
+        for n, cluster in enumerate(results, 1):
+            gen.progress((n - 1) / len(results),
+                         text=f"Summarising story {n} of {len(results)}…")
+            ai = rewrite_with_gemini(cluster["title"], cluster["description"])
+            cluster["ai_headline"] = ai["headline"]
+            cluster["ai_description"] = ai["body"]
+        gen.progress(1.0, text="Done!")
+        gen.empty()
+
     st.session_state.trending_results = results
     st.session_state.trending_state = "ready"
     st.rerun()
@@ -350,13 +381,11 @@ if st.session_state.trending_state == "loading":
 if st.session_state.trending_state == "ready":
     head_l, head_r = st.columns([5, 1])
     with head_l:
-        st.subheader("🏆 Top Stories Common Across All Sources")
+        st.subheader("🔥 Trending Across All Sources")
     with head_r:
         if st.button("← Back to Feed", use_container_width=True):
             st.session_state.trending_state = "idle"
             st.rerun()
-
-    st.caption("Ranked by how many different news outlets are covering the same story — #1 is the most widely covered.")
 
     results = st.session_state.trending_results
     if not results:
@@ -365,13 +394,17 @@ if st.session_state.trending_state == "ready":
         for rank, cluster in enumerate(results, 1):
             source_count = len(cluster["sources"])
             sources_list = ", ".join(sorted(cluster["sources"]))
+            headline    = cluster.get("ai_headline") or cluster["title"]
+            description = cluster.get("ai_description", "")
             st.markdown(
                 f'<div class="rank-card">'
                 f'<span class="rank-num">{rank}</span>'
-                f'<span class="rank-title">{cluster["title"]}</span>'
+                f'<span class="rank-title">{headline}</span>'
                 f'<span class="rank-badge">{source_count} '
                 f'{"sources" if source_count != 1 else "source"}</span>'
                 f'<div class="rank-meta">📰 Covered by: {sources_list}</div>'
+                f'<div class="rank-model">GEMINI 2.5 FLASH</div>'
+                f'<div class="rank-desc">{description}</div>'
                 f'</div>',
                 unsafe_allow_html=True
             )
