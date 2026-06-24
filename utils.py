@@ -24,9 +24,7 @@ RSS_FEEDS = {
     "Indian Express": "https://indianexpress.com/section/india/feed/",
     "Economic Times": "https://economictimes.indiatimes.com/rssfeedstopstories.cms",
     "The Hindu": "https://www.thehindu.com/news/national/feeder/default.rss",
-    "Times of India": "https://timesofindia.indiatimes.com/rssfeedstopstories.cms",
-    "Hindustan Times": "https://www.hindustantimes.com/feeds/rss/topnews/rssfeed.xml",
-    "AP News": "https://apnews.com/feed"
+    "Times of India": "https://timesofindia.indiatimes.com/rssfeedstopstories.cms"
 }
 
 # 2. Global System Prompt for all models

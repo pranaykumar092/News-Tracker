@@ -23,7 +23,7 @@ def build_excel(rows):
     ws = wb.active
     ws.title = "Newsdrum Export"
 
-    headers = ["Source News", "News Headline", "Extension"]
+    headers = ["Source News", "News Headline", "News Description", "Newsdrum Version"]
     col_widths = [len(h) for h in headers]
 
     # ── Thin border ───────────────────────────────────────────
@@ -89,7 +89,7 @@ def render_export_button(slot):
             )
             excel_bytes = build_excel(st.session_state.csv_rows)
             st.download_button(
-                label="📥 Export Excel",
+                label="📤 Publish",
                 data=excel_bytes,
                 file_name=fname,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -97,10 +97,10 @@ def render_export_button(slot):
             )
         else:
             st.button(
-                "📥 Export Excel",
+                "📤 Publish",
                 disabled=True,
                 use_container_width=True,
-                help="Fetch news first to enable export."
+                help="Fetch news first to enable publish."
             )
 
 # ── Session state init ────────────────────────────────────────
@@ -240,14 +240,21 @@ if selected_source:
 
             # Accumulate for export — guard against duplicates on rerun
             already_added = any(
-                row[0] == item["title"]
+                row[0] == selected_source and row[1] == col1_data["headline"]
                 for row in st.session_state.csv_rows
             )
             if not already_added:
+                def make_payload(data):
+                    return (
+                        f"TITLE: {data['headline']}\n"
+                        f"STRAPLINE: {data['strapline']}\n\n"
+                        f"{data['body']}"
+                    )
                 st.session_state.csv_rows.append([
-                    item["title"],          # Source News
-                    col1_data["headline"],  # News Headline
-                    col1_data["body"],      # Extension
+                    selected_source,            # Source News (e.g. NDTV, Moneycontrol)
+                    col1_data["headline"],      # News Headline — Gemini 2.5 Flash
+                    col1_data["body"],          # News Description — Gemini 2.5 Flash
+                    make_payload(col1_data),    # Newsdrum Version — full TITLE + STRAPLINE + BODY
                 ])
 
             col1, col2, col3 = st.columns(3)
