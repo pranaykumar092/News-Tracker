@@ -1,13 +1,13 @@
 # 📰 Newsdrum AI Aggregator Panel
 
-A **Streamlit-powered news aggregator** that pulls live RSS feeds from major Indian and global news outlets and rewrites each story using AI models (Groq, Gemini, Nvidia Nemotron) in the distinct Newsdrum editorial style.
+A **Streamlit-powered news aggregator** that pulls live RSS feeds from major Indian and global news outlets and rewrites each story using AI models (Groq, Gemini, Cerebras) in the distinct Newsdrum editorial style.
 
 ---
 
 ## ✨ Features
 
 - 🔴 **Live RSS feeds** from NDTV, Moneycontrol, Indian Express, Economic Times, The Hindu, Times of India, Hindustan Times, and AP News
-- 🤖 **AI-powered rewriting** using Groq (Llama 3.1), Google Gemini 2.5 Flash, and Nvidia Nemotron 70B
+- 🤖 **AI-powered rewriting** using Groq (Llama 3.1), Google Gemini 2.5 Flash, and Cerebras
 - 📋 **One-click copy** for each AI-generated article
 - ⚡ Clean, minimal editorial UI built with Streamlit
 
@@ -77,7 +77,7 @@ Open `.env` and paste the following, replacing each placeholder with your actual
 ```env
 GROQ_API_KEY=your_groq_api_key_here
 GEMINI_API_KEY=your_gemini_api_key_here
-NVIDIA_API_KEY=your_nvidia_api_key_here
+CEREBRAS_API_KEY=your_cerebras_api_key_here
 ```
 
 ### Step 3 — Get your API keys
@@ -86,7 +86,7 @@ NVIDIA_API_KEY=your_nvidia_api_key_here
 |---|---|---|
 | `GROQ_API_KEY` | Groq (free tier available) | [console.groq.com](https://console.groq.com) → API Keys |
 | `GEMINI_API_KEY` | Google AI Studio (free tier available) | [aistudio.google.com](https://aistudio.google.com) → Get API Key |
-| `NVIDIA_API_KEY` | Nvidia NGC (free credits available) | [build.nvidia.com](https://build.nvidia.com) → Get API Key |
+| `CEREBRAS_API_KEY` | Cerebras | [cloud.cerebras.ai](https://cloud.cerebras.ai/) → API Keys |
 
 > ⚠️ **Never commit your `.env` file to GitHub.** It is already listed in `.gitignore` and will be ignored automatically.
 

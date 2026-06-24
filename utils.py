@@ -14,9 +14,9 @@ load_dotenv()
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
-nvidia_client = OpenAI(
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key=os.environ.get("NVIDIA_API_KEY")
+cerebras_client = OpenAI(
+    base_url="https://api.cerebras.ai/v1",
+    api_key=os.environ.get("CEREBRAS_API_KEY")
 )
 
 # 1. RSS Feed Sources configuration
@@ -228,14 +228,14 @@ def rewrite_with_gemini(title, context):
     except Exception as e:
         return {"headline": title, "strapline": "Gemini Error", "body": str(e)}
 
-def rewrite_with_nemotron(title, context):
+def rewrite_with_cerebras(title, context):
     try:
-        chat = nvidia_client.chat.completions.create(
-            model="meta/llama-3.1-nemotron-70b-instruct",
+        chat = cerebras_client.chat.completions.create(
+            model="llama3.1-70b",
             messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": f"Title: {title}\nContext: {context}"}],
             temperature=0.7,
             max_tokens=500
         )
         return parse_ai_response(chat.choices[0].message.content, title)
     except Exception as e:
-        return {"headline": title, "strapline": "Nvidia Error", "body": str(e)}
+        return {"headline": title, "strapline": "Cerebras Error", "body": str(e)}
