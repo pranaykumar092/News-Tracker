@@ -83,13 +83,14 @@ def render_export_button(slot):
 
     with slot:
         if has_data:
+            count = len(st.session_state.csv_rows)
             fname = (
-                f"newsdrum_{st.session_state.active_source.replace(' ', '_')}_"
-                f"{datetime.now().strftime('%Y%m%d')}.xlsx"
+                f"newsdrum_all_sources_"
+                f"{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
             )
             excel_bytes = build_excel(st.session_state.csv_rows)
             st.download_button(
-                label="📤 Publish",
+                label=f"📤 Publish ({count})",
                 data=excel_bytes,
                 file_name=fname,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -199,9 +200,9 @@ with st.sidebar:
         label_visibility="collapsed"
     )
 
-# ── Reset when source changes or refresh clicked ──────────────
-if selected_source != st.session_state.active_source or refresh_clicked:
-    st.session_state.active_source = selected_source
+# ── Track active source; only wipe rows on manual refresh ────
+st.session_state.active_source = selected_source
+if refresh_clicked:
     st.session_state.csv_rows = []
 
 # ── Header row: title left, button placeholder right ─────────
