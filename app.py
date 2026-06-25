@@ -7,7 +7,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 from st_copy_to_clipboard import st_copy_to_clipboard
-from utils import RSS_FEEDS, fetch_top_stories, rewrite_with_groq, rewrite_with_gemini, rewrite_with_cerebras
+from utils import RSS_FEEDS, fetch_top_stories, rewrite_with_groq, rewrite_with_gemini, rewrite_with_nvidia
 
 st.set_page_config(page_title="Newsdrum AI Aggregator Panel", layout="wide")
 
@@ -485,7 +485,7 @@ if st.session_state.publish_state != "loading" and st.session_state.trending_sta
                 for idx, item in enumerate(raw_items):
                     with st.spinner(f"AI is writing story {idx + 1} of {len(raw_items)}…"):
                         col1_data = rewrite_with_gemini(item["title"], item["description"])
-                        col2_data = rewrite_with_cerebras(item["title"], item["description"])
+                        col2_data = rewrite_with_nvidia(item["title"], item["description"])
                         col3_data = rewrite_with_groq(item["title"], item["description"])
                     cached_items.append({
                         "raw": item,
@@ -539,5 +539,5 @@ if st.session_state.publish_state != "loading" and st.session_state.trending_sta
                             )
 
                 render_native_card("Gemini 2.5 Flash",    col1_data, col1, "1")
-                render_native_card("Cerebras",  col2_data, col2, "2")
+                render_native_card("NVIDIA Nemotron 1B",  col2_data, col2, "2")
                 render_native_card("Groq Llama 3.1",       col3_data, col3, "3")
