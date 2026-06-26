@@ -7,7 +7,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 from st_copy_to_clipboard import st_copy_to_clipboard
-from utils import RSS_FEEDS, fetch_top_stories, rewrite_with_groq, rewrite_with_gemini, rewrite_with_nemotron
+from utils import RSS_FEEDS, fetch_top_stories, rewrite_with_groq, rewrite_with_gemini, rewrite_with_nvidia
 
 st.set_page_config(page_title="Newsdrum AI Aggregator Panel", layout="wide")
 
@@ -24,6 +24,8 @@ if "trending_state" not in st.session_state:
     st.session_state.trending_state = "idle"  # idle | loading | ready
 if "trending_results" not in st.session_state:
     st.session_state.trending_results = []
+if "live_feed_cache" not in st.session_state:
+    st.session_state.live_feed_cache = {}
 
 # ── Excel builder ─────────────────────────────────────────────
 def build_excel(rows):
@@ -176,6 +178,16 @@ st.markdown("""
     }
     [data-testid="stExpander"] div { color: #334155 !important; }
 
+    /* Make bordered containers white to seamlessly blend iframe backgrounds */
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        background-color: #ffffff;
+    }
+    
+    /* Ensure the sidebar keeps its native transparent background */
+    [data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] {
+        background-color: transparent !important;
+    }
+
     .model-badge {
         font-size: 12px; font-weight: 700; text-transform: uppercase;
         letter-spacing: 1px; margin-bottom: 10px; color: #64748b;
@@ -303,6 +315,7 @@ if refresh_clicked:
     st.session_state.publish_state = "idle"
     st.session_state.publish_excel = None
     st.session_state.trending_state = "idle"   # return to normal feed
+    st.session_state.live_feed_cache = {}      # Clear cache to force re-fetch
 
 if trending_clicked:
     st.session_state.trending_state = "loading"
@@ -318,26 +331,49 @@ btn_slot = btn_col.empty()   # filled after any heavy work below
 # ── PUBLISH: loading phase — fetch ALL sources + rewrite ──────
 if st.session_state.publish_state == "loading":
     all_rows = []
-    sources  = list(RSS_FEEDS.keys())
-    st.info("📤 Compiling all sources for publish…")
-    progress_bar = st.progress(0, text="Starting…")
-
-    for i, source in enumerate(sources):
-        progress_bar.progress((i) / len(sources), text=f"Fetching {source}…")
-        items = fetch_top_stories(source, limit=5)
-        for item in items:
-            data = rewrite_with_gemini(item["title"], item["description"])
+    
+    if st.session_state.trending_state == "ready" and st.session_state.trending_results:
+        st.info("📤 Compiling trending stories for publish…")
+        for cluster in st.session_state.trending_results:
+            sources_str = ", ".join(sorted(cluster["sources"]))
+            headline = cluster.get("ai_headline", cluster["title"])
+            body = cluster.get("ai_description", "")
+            
+            data = {
+                "headline": headline,
+                "strapline": f"Covered by: {sources_str}",
+                "body": body
+            }
             all_rows.append([
-                source,
+                f"Trending ({len(cluster['sources'])} sources)\nCovered by: {sources_str}",
                 data["headline"],
                 data["body"],
                 make_payload(data),
             ])
+        st.session_state.publish_excel = build_excel(all_rows)
+        st.session_state.publish_state = "ready"
+        st.rerun()
+    else:
+        sources  = list(RSS_FEEDS.keys())
+        st.info("📤 Compiling all sources for publish…")
+        progress_bar = st.progress(0, text="Starting…")
 
-    progress_bar.progress(1.0, text="Done!")
-    st.session_state.publish_excel = build_excel(all_rows)
-    st.session_state.publish_state = "ready"
-    st.rerun()
+        for i, source in enumerate(sources):
+            progress_bar.progress((i) / len(sources), text=f"Fetching {source}…")
+            items = fetch_top_stories(source, limit=5)
+            for item in items:
+                data = rewrite_with_gemini(item["title"], item["description"])
+                all_rows.append([
+                    source,
+                    data["headline"],
+                    data["body"],
+                    make_payload(data),
+                ])
+
+        progress_bar.progress(1.0, text="Done!")
+        st.session_state.publish_excel = build_excel(all_rows)
+        st.session_state.publish_state = "ready"
+        st.rerun()
 
 # ── Render Publish button into slot ──────────────────────────
 with btn_slot:
@@ -350,9 +386,15 @@ with btn_slot:
         st.button("⏳ Preparing…", disabled=True, use_container_width=True)
 
     elif st.session_state.publish_state == "ready":
-        fname = f"newsdrum_all_sources_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        if st.session_state.trending_state == "ready":
+            fname = f"newsdrum_trending_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+            label = "📥 Download Trending"
+        else:
+            fname = f"newsdrum_all_sources_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+            label = "📥 Download All"
+            
         st.download_button(
-            label="📥 Download",
+            label=label,
             data=st.session_state.publish_excel,
             file_name=fname,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -365,15 +407,16 @@ if st.session_state.trending_state == "loading":
     st.info("Scanning every source and measuring how widely each story is covered…")
     results = find_common_stories(threshold=0.18, top_n=5)
 
-    # Generate a Gemini 2.5 Flash description for each trending story.
+    # Generate a Groq description for each trending story.
     if results:
-        gen = st.progress(0, text="Writing summaries with Gemini 2.5 Flash…")
+        gen = st.progress(0, text="Writing summaries with Groq Llama 3.1…")
         for n, cluster in enumerate(results, 1):
             gen.progress((n - 1) / len(results),
                          text=f"Summarising story {n} of {len(results)}…")
-            ai = rewrite_with_gemini(cluster["title"], cluster["description"])
+            ai = rewrite_with_groq(cluster["title"], cluster["description"])
             cluster["ai_headline"] = ai["headline"]
             cluster["ai_description"] = ai["body"]
+            cluster["ai_strapline"] = ai["strapline"]
         gen.progress(1.0, text="Done!")
         gen.empty()
 
@@ -400,29 +443,69 @@ if st.session_state.trending_state == "ready":
             sources_list = ", ".join(sorted(cluster["sources"]))
             headline    = cluster.get("ai_headline") or cluster["title"]
             description = cluster.get("ai_description", "")
-            st.markdown(
-                f'<div class="rank-card">'
-                f'<span class="rank-num">{rank}</span>'
-                f'<span class="rank-title">{headline}</span>'
-                f'<span class="rank-badge">{source_count} '
-                f'{"sources" if source_count != 1 else "source"}</span>'
-                f'<div class="rank-meta">📰 Covered by: {sources_list}</div>'
-                f'<div class="rank-model">GEMINI 2.5 FLASH</div>'
-                f'<div class="rank-desc">{description}</div>'
-                f'</div>',
-                unsafe_allow_html=True
-            )
+            strapline = cluster.get("ai_strapline", f"Covered by: {sources_list}")
+            
+            with st.container(border=True):
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    st.markdown(
+                        f'<div style="border-left: 5px solid #000000; padding-left: 15px;">'
+                        f'<span class="rank-num">{rank}</span>'
+                        f'<span class="rank-title">{headline}</span>'
+                        f'<span class="rank-badge">{source_count} '
+                        f'{"sources" if source_count != 1 else "source"}</span>'
+                        f'<div class="rank-meta">📰 Covered by: {sources_list}</div>'
+                        f'<div class="rank-model">GROQ LLAMA 3.1</div>'
+                        f'<div class="meta-strapline" style="margin-top: 10px;">{strapline}</div>'
+                        f'<div class="rank-desc">{description}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+                with col2:
+                    data = {"headline": headline, "strapline": strapline, "body": description}
+                    payload = make_payload(data)
+                    st_copy_to_clipboard(
+                        payload,
+                        before_copy_label="📋 Copy",
+                        after_copy_label="✅ Copied!",
+                        key=f"copy_trending_{rank}"
+                    )
 
 # ── Main live feed (hidden while publishing or viewing trending) ─
 if st.session_state.publish_state != "loading" and st.session_state.trending_state == "idle":
     if selected_source:
-        with st.spinner(f"Intercepting top stories from {selected_source}..."):
-            raw_items = fetch_top_stories(selected_source, limit=5)
+        if selected_source not in st.session_state.live_feed_cache:
+            with st.spinner(f"Intercepting top stories from {selected_source}..."):
+                raw_items = fetch_top_stories(selected_source, limit=5)
 
-        if not raw_items:
+            if not raw_items:
+                st.session_state.live_feed_cache[selected_source] = None
+            else:
+                cached_items = []
+                for idx, item in enumerate(raw_items):
+                    with st.spinner(f"AI is writing story {idx + 1} of {len(raw_items)}…"):
+                        col1_data = rewrite_with_gemini(item["title"], item["description"])
+                        col2_data = rewrite_with_nvidia(item["title"], item["description"])
+                        col3_data = rewrite_with_groq(item["title"], item["description"])
+                    cached_items.append({
+                        "raw": item,
+                        "col1_data": col1_data,
+                        "col2_data": col2_data,
+                        "col3_data": col3_data
+                    })
+                st.session_state.live_feed_cache[selected_source] = cached_items
+        
+        cached_source_data = st.session_state.live_feed_cache.get(selected_source)
+        
+        if cached_source_data is None:
             st.error("Connection blocked by source firewall. Try a different outlet.")
         else:
-            for idx, item in enumerate(raw_items):
+            for idx, cached_item in enumerate(cached_source_data):
+                item = cached_item["raw"]
+                col1_data = cached_item["col1_data"]
+                col2_data = cached_item["col2_data"]
+                col3_data = cached_item["col3_data"]
+                
                 st.markdown("---")
                 st.markdown(
                     f'<div class="source-banner">'
@@ -434,11 +517,6 @@ if st.session_state.publish_state != "loading" and st.session_state.trending_sta
                 with st.expander(f"Original Article: {item['title']}"):
                     st.markdown(item['description'], unsafe_allow_html=True)
                     st.link_button("🔗 View Original Source", item["link"])
-
-                with st.spinner("AI is writing…"):
-                    col1_data = rewrite_with_groq(item["title"], item["description"])
-                    col2_data = rewrite_with_groq(item["title"], item["description"])
-                    col3_data = rewrite_with_groq(item["title"], item["description"])
 
                 col1, col2, col3 = st.columns(3)
 
@@ -455,11 +533,11 @@ if st.session_state.publish_state != "loading" and st.session_state.trending_sta
                             payload = make_payload(data)
                             st_copy_to_clipboard(
                                 payload,
-                                before_copy_label=f"📋 Copy {model_label}",
+                                before_copy_label="📋 Copy",
                                 after_copy_label="✅ Copied!",
                                 key=f"copy_{idx}_{key_suffix}"
                             )
 
                 render_native_card("Gemini 2.5 Flash",    col1_data, col1, "1")
-                render_native_card("Nvidia Nemotron 70B",  col2_data, col2, "2")
+                render_native_card("NVIDIA Nemotron 1B",  col2_data, col2, "2")
                 render_native_card("Groq Llama 3.1",       col3_data, col3, "3")
