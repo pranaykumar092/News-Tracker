@@ -33,7 +33,7 @@ def build_excel(rows):
     ws = wb.active
     ws.title = "Newsdrum Export"
 
-    headers = ["Source News", "News Headline", "News Description", "Newsdrum Version"]
+    headers = ["Source News", "News Headline", "News Description", "Source Link"]
     col_widths = [len(h) for h in headers]
 
     def thin():
@@ -78,6 +78,11 @@ def make_payload(data):
         f"STRAPLINE: {data['strapline']}\n\n"
         f"{data['body']}"
     )
+
+def is_error(data):
+    """True when a rewrite_* result is an API/token/rate-limit error.
+    On error the rewrite functions set strapline to e.g. 'Gemini Error'."""
+    return str(data.get("strapline", "")).strip().endswith("Error")
 
 # ── Common-story detection ────────────────────────────────────
 # Words too generic to help identify a story — ignored when matching.
@@ -151,6 +156,7 @@ def find_common_stories(threshold=0.18, top_n=5):
         rep = max(cluster["stories"], key=lambda s: len(s["description"]))
         cluster["title"] = rep["title"]
         cluster["description"] = rep["description"]
+        cluster["link"] = rep["link"]
 
     # Rank: most distinct sources first, then largest cluster.
     ranked = sorted(
@@ -182,7 +188,7 @@ st.markdown("""
     [data-testid="stVerticalBlockBorderWrapper"] {
         background-color: #ffffff;
     }
-    
+
     /* Ensure the sidebar keeps its native transparent background */
     [data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] {
         background-color: transparent !important;
@@ -331,24 +337,20 @@ btn_slot = btn_col.empty()   # filled after any heavy work below
 # ── PUBLISH: loading phase — fetch ALL sources + rewrite ──────
 if st.session_state.publish_state == "loading":
     all_rows = []
-    
+
     if st.session_state.trending_state == "ready" and st.session_state.trending_results:
         st.info("📤 Compiling trending stories for publish…")
         for cluster in st.session_state.trending_results:
             sources_str = ", ".join(sorted(cluster["sources"]))
             headline = cluster.get("ai_headline", cluster["title"])
-            body = cluster.get("ai_description", "")
-            
-            data = {
-                "headline": headline,
-                "strapline": f"Covered by: {sources_str}",
-                "body": body
-            }
+            # If the rewrite errored (e.g. ran out of tokens), show a clean note.
+            err  = str(cluster.get("ai_strapline", "")).strip().endswith("Error")
+            body = "Error Occurred" if err else cluster.get("ai_description", "")
             all_rows.append([
                 f"Trending ({len(cluster['sources'])} sources)\nCovered by: {sources_str}",
-                data["headline"],
-                data["body"],
-                make_payload(data),
+                headline,
+                body,
+                cluster.get("link", "#"),   # Source link
             ])
         st.session_state.publish_excel = build_excel(all_rows)
         st.session_state.publish_state = "ready"
@@ -363,11 +365,14 @@ if st.session_state.publish_state == "loading":
             items = fetch_top_stories(source, limit=5)
             for item in items:
                 data = rewrite_with_gemini(item["title"], item["description"])
+                # If Gemini errored (e.g. ran out of tokens), don't paste the
+                # raw error — just mark the cell as "Error Occurred".
+                description = "Error Occurred" if is_error(data) else data["body"]
                 all_rows.append([
-                    source,
-                    data["headline"],
-                    data["body"],
-                    make_payload(data),
+                    source,                 # Source News
+                    data["headline"],       # News Headline (Gemini)
+                    description,            # News Description (Gemini) / error note
+                    item["link"],          # Source Link (from the website)
                 ])
 
         progress_bar.progress(1.0, text="Done!")
@@ -392,7 +397,7 @@ with btn_slot:
         else:
             fname = f"newsdrum_all_sources_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
             label = "📥 Download All"
-            
+
         st.download_button(
             label=label,
             data=st.session_state.publish_excel,
@@ -407,13 +412,13 @@ if st.session_state.trending_state == "loading":
     st.info("Scanning every source and measuring how widely each story is covered…")
     results = find_common_stories(threshold=0.18, top_n=5)
 
-    # Generate a Groq description for each trending story.
+    # Generate a Gemini 2.5 Flash description for each trending story.
     if results:
-        gen = st.progress(0, text="Writing summaries with Groq Llama 3.1…")
+        gen = st.progress(0, text="Writing summaries with Gemini 2.5 Flash…")
         for n, cluster in enumerate(results, 1):
             gen.progress((n - 1) / len(results),
                          text=f"Summarising story {n} of {len(results)}…")
-            ai = rewrite_with_groq(cluster["title"], cluster["description"])
+            ai = rewrite_with_gemini(cluster["title"], cluster["description"])
             cluster["ai_headline"] = ai["headline"]
             cluster["ai_description"] = ai["body"]
             cluster["ai_strapline"] = ai["strapline"]
@@ -444,7 +449,7 @@ if st.session_state.trending_state == "ready":
             headline    = cluster.get("ai_headline") or cluster["title"]
             description = cluster.get("ai_description", "")
             strapline = cluster.get("ai_strapline", f"Covered by: {sources_list}")
-            
+
             with st.container(border=True):
                 col1, col2 = st.columns([5, 1])
                 with col1:
@@ -455,7 +460,7 @@ if st.session_state.trending_state == "ready":
                         f'<span class="rank-badge">{source_count} '
                         f'{"sources" if source_count != 1 else "source"}</span>'
                         f'<div class="rank-meta">📰 Covered by: {sources_list}</div>'
-                        f'<div class="rank-model">GROQ LLAMA 3.1</div>'
+                        f'<div class="rank-model">GEMINI 2.5 FLASH</div>'
                         f'<div class="meta-strapline" style="margin-top: 10px;">{strapline}</div>'
                         f'<div class="rank-desc">{description}</div>'
                         f'</div>',
@@ -485,27 +490,29 @@ if st.session_state.publish_state != "loading" and st.session_state.trending_sta
                 for idx, item in enumerate(raw_items):
                     with st.spinner(f"AI is writing story {idx + 1} of {len(raw_items)}…"):
                         col1_data = rewrite_with_gemini(item["title"], item["description"])
-                        col2_data = rewrite_with_nvidia(item["title"], item["description"])
-                        col3_data = rewrite_with_groq(item["title"], item["description"])
+                        # --- DISABLED: only Gemini news is shown for now ---
+                        # col2_data = rewrite_with_nvidia(item["title"], item["description"])
+                        # col3_data = rewrite_with_groq(item["title"], item["description"])
                     cached_items.append({
                         "raw": item,
                         "col1_data": col1_data,
-                        "col2_data": col2_data,
-                        "col3_data": col3_data
+                        # "col2_data": col2_data,
+                        # "col3_data": col3_data
                     })
                 st.session_state.live_feed_cache[selected_source] = cached_items
-        
+
         cached_source_data = st.session_state.live_feed_cache.get(selected_source)
-        
+
         if cached_source_data is None:
             st.error("Connection blocked by source firewall. Try a different outlet.")
         else:
             for idx, cached_item in enumerate(cached_source_data):
                 item = cached_item["raw"]
                 col1_data = cached_item["col1_data"]
-                col2_data = cached_item["col2_data"]
-                col3_data = cached_item["col3_data"]
-                
+                # --- DISABLED: only Gemini news is shown for now ---
+                # col2_data = cached_item["col2_data"]
+                # col3_data = cached_item["col3_data"]
+
                 st.markdown("---")
                 st.markdown(
                     f'<div class="source-banner">'
@@ -517,8 +524,6 @@ if st.session_state.publish_state != "loading" and st.session_state.trending_sta
                 with st.expander(f"Original Article: {item['title']}"):
                     st.markdown(item['description'], unsafe_allow_html=True)
                     st.link_button("🔗 View Original Source", item["link"])
-
-                col1, col2, col3 = st.columns(3)
 
                 def render_native_card(model_label, data, column_ref, key_suffix):
                     with column_ref:
@@ -538,6 +543,9 @@ if st.session_state.publish_state != "loading" and st.session_state.trending_sta
                                 key=f"copy_{idx}_{key_suffix}"
                             )
 
-                render_native_card("Gemini 2.5 Flash",    col1_data, col1, "1")
-                render_native_card("NVIDIA Nemotron 1B",  col2_data, col2, "2")
-                render_native_card("Groq Llama 3.1",       col3_data, col3, "3")
+                # Only Gemini is active — render it full width.
+                render_native_card("Gemini 2.5 Flash", col1_data, st.container(), "1")
+                # --- DISABLED: Groq and NVIDIA cards ---
+                # col1, col2, col3 = st.columns(3)
+                # render_native_card("NVIDIA Nemotron 1B",  col2_data, col2, "2")
+                # render_native_card("Groq Llama 3.1",       col3_data, col3, "3")
