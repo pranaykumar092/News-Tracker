@@ -33,7 +33,7 @@ def build_excel(rows):
     ws = wb.active
     ws.title = "Newsdrum Export"
 
-    headers = ["Source", "Source News", "NewsDrum Version"]
+    headers = ["Source", "Source link", "Source News", "NewsDrum Version"]
     col_widths = [len(h) for h in headers]
 
     def thin():
@@ -52,14 +52,24 @@ def build_excel(rows):
         max_lines = 1
         for c, val in enumerate(row, 1):
             text = str(val) if val else ""
-            cell = ws.cell(row=r, column=c, value=text)
-            cell.font      = Font(name="Arial", size=10)
+            
+            # Format Source link column as a clickable hyperlink to save space
+            if c == 2 and text.startswith("http"):
+                cell = ws.cell(row=r, column=c, value="View Source")
+                cell.hyperlink = text
+                cell.font = Font(name="Arial", size=10, color="0563C1", underline="single")
+                display_text = "View Source"
+            else:
+                cell = ws.cell(row=r, column=c, value=text)
+                cell.font = Font(name="Arial", size=10)
+                display_text = text
+
             cell.alignment = Alignment(vertical="top", wrap_text=True)
             cell.border    = thin()
-            longest_line   = max((len(line) for line in text.split("\n")), default=0)
+            longest_line   = max((len(line) for line in display_text.split("\n")), default=0)
             col_widths[c-1] = min(80, max(col_widths[c-1], longest_line))
             cap   = col_widths[c-1] if col_widths[c-1] > 0 else 1
-            lines = sum(max(1, (len(line)+cap-1)//cap) for line in text.split("\n"))
+            lines = sum(max(1, (len(line)+cap-1)//cap) for line in display_text.split("\n"))
             max_lines = max(max_lines, lines)
         ws.row_dimensions[r].height = min(400, max(18, max_lines * 15))
 
@@ -321,13 +331,41 @@ with st.sidebar:
         key="trending_btn",
     )
     st.write("### TRACKED SOURCES")
-    selected_source = st.radio(
-        "Select News Portal",
-        options=list(RSS_FEEDS.keys()),
-        label_visibility="collapsed"
-    )
+    selected_export_sources = []
+    for source in list(RSS_FEEDS.keys()):
+        col_left, col_right = st.columns([4, 1])
+        with col_left:
+            if st.button(source, use_container_width=True, key=f"btn_{source}"):
+                st.session_state.active_source = source
+        with col_right:
+            if st.checkbox("Export", key=f"export_{source}", label_visibility="collapsed"):
+                selected_export_sources.append(source)
+    
+    st.write("---")
+    
+    if st.session_state.publish_state == "ready":
+        if st.session_state.trending_state == "ready":
+            fname = f"newsdrum_trending_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+            label = "📥 Download Trending"
+        else:
+            fname = f"newsdrum_all_sources_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+            label = "📥 Download All"
 
-st.session_state.active_source = selected_source
+        st.download_button(
+            label=label,
+            data=st.session_state.publish_excel,
+            file_name=fname,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    elif selected_export_sources:
+        if st.button("📤 Compile Selected Sources", use_container_width=True, type="primary"):
+            st.session_state.publish_state = "loading"
+            st.rerun()
+
+if st.session_state.active_source is None:
+    st.session_state.active_source = list(RSS_FEEDS.keys())[0]
+selected_source = st.session_state.active_source
 if refresh_clicked:
     st.session_state.publish_state = "idle"
     st.session_state.publish_excel = None
@@ -339,16 +377,10 @@ if trending_clicked:
     st.rerun()
 
 # ── Header row ────────────────────────────────────────────────
-header_col, btn_col = st.columns([5, 1])
-with header_col:
-    st.subheader(f"⚡ Live Feed: {selected_source}")
-
-btn_slot = btn_col.empty()   # filled after any heavy work below
+st.subheader(f"⚡ Live Feed: {selected_source}")
 
 # ── PUBLISH: loading phase — fetch ALL sources + rewrite ──────
 if st.session_state.publish_state == "loading":
-    with btn_slot:
-        st.button("⏳ Preparing…", disabled=True, use_container_width=True)
     all_rows = []
 
     if st.session_state.trending_state == "ready" and st.session_state.trending_results:
@@ -364,6 +396,7 @@ if st.session_state.publish_state == "loading":
 
             all_rows.append([
                 f"Trending ({len(cluster['sources'])} sources)",
+                cluster.get("link", "#"),
                 cluster['title'],
                 newsdrum_version
             ])
@@ -371,26 +404,39 @@ if st.session_state.publish_state == "loading":
         st.session_state.publish_state = "ready"
         st.rerun()
     else:
-        sources  = list(RSS_FEEDS.keys())
-        st.info("📤 Compiling all sources for publish…")
+        sources = selected_export_sources
+        st.info("📤 Compiling selected sources for publish…")
         progress_bar = st.progress(0, text="Starting…")
 
         for i, source in enumerate(sources):
             progress_bar.progress((i) / len(sources), text=f"Fetching {source}…")
-            items = fetch_top_stories(source, limit=5)
-            for item in items:
-                data = rewrite_with_gemini(item["title"], item["description"])
-                all_rows.append([
-                    source,
-                    item['title'],
-                    make_payload(data)
-                ])
+            
+            if source in st.session_state.live_feed_cache and st.session_state.live_feed_cache[source] is not None:
+                cached_source_data = st.session_state.live_feed_cache[source]
+                for cached_item in cached_source_data:
+                    item = cached_item["raw"]
+                    data = cached_item["col1_data"]
+                    all_rows.append([
+                        source,
+                        item['link'],
+                        item['title'],
+                        make_payload(data)
+                    ])
+            else:
+                items = fetch_top_stories(source, limit=5)
+                for item in items:
+                    data = rewrite_with_gemini(item["title"], item["description"])
+                    all_rows.append([
+                        source,
+                        item['link'],
+                        item['title'],
+                        make_payload(data)
+                    ])
 
         progress_bar.progress(1.0, text="Done!")
         st.session_state.publish_excel = build_excel(all_rows)
         st.session_state.publish_state = "ready"
         st.rerun()
-
 # ── TRENDING: loading phase — scan all sources for common stories ─
 if st.session_state.trending_state == "loading":
     st.subheader("🔥 Trending Across All Sources")
@@ -539,25 +585,4 @@ if st.session_state.publish_state != "loading" and st.session_state.trending_sta
                 # render_native_card("NVIDIA Nemotron 1B",  col2_data, col2, "2")
                 # render_native_card("Groq Llama 3.1",       col3_data, col3, "3")
 
-# ── Render Publish / Download button at the end ────────────────────────
-if st.session_state.publish_state != "loading":
-    with btn_slot:
-        if st.session_state.publish_state == "idle":
-            if st.button("📤 Publish", use_container_width=True):
-                st.session_state.publish_state = "loading"
-                st.rerun()
-        elif st.session_state.publish_state == "ready":
-            if st.session_state.trending_state == "ready":
-                fname = f"newsdrum_trending_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-                label = "📥 Download Trending"
-            else:
-                fname = f"newsdrum_all_sources_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-                label = "📥 Download All"
-
-            st.download_button(
-                label=label,
-                data=st.session_state.publish_excel,
-                file_name=fname,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
+# ── End of App ────────────────────────────────────────────────
