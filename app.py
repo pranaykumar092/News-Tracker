@@ -7,7 +7,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 from st_copy_to_clipboard import st_copy_to_clipboard
-from utils import RSS_FEEDS, fetch_top_stories, rewrite_with_groq, rewrite_with_gemini, rewrite_with_nvidia
+from utils import RSS_FEEDS, fetch_top_stories, calculate_accuracy_with_groq, rewrite_with_gemini, rewrite_with_nvidia
 
 st.set_page_config(page_title="Newsdrum AI Aggregator Panel", layout="wide")
 
@@ -33,7 +33,7 @@ def build_excel(rows):
     ws = wb.active
     ws.title = "Newsdrum Export"
 
-    headers = ["Source News", "News Headline", "News Description", "Source Link"]
+    headers = ["Source", "Source News", "NewsDrum Version"]
     col_widths = [len(h) for h in headers]
 
     def thin():
@@ -194,6 +194,17 @@ st.markdown("""
         background-color: transparent !important;
     }
 
+    .accuracy-badge {
+        float: right;
+        background-color: #f1f5f9;
+        color: #10b981;
+        padding: 4px 10px;
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: 800;
+        border: 1px solid #e2e8f0;
+    }
+
     .model-badge {
         font-size: 12px; font-weight: 700; text-transform: uppercase;
         letter-spacing: 1px; margin-bottom: 10px; color: #64748b;
@@ -336,6 +347,8 @@ btn_slot = btn_col.empty()   # filled after any heavy work below
 
 # ── PUBLISH: loading phase — fetch ALL sources + rewrite ──────
 if st.session_state.publish_state == "loading":
+    with btn_slot:
+        st.button("⏳ Preparing…", disabled=True, use_container_width=True)
     all_rows = []
 
     if st.session_state.trending_state == "ready" and st.session_state.trending_results:
@@ -343,14 +356,16 @@ if st.session_state.publish_state == "loading":
         for cluster in st.session_state.trending_results:
             sources_str = ", ".join(sorted(cluster["sources"]))
             headline = cluster.get("ai_headline", cluster["title"])
-            # If the rewrite errored (e.g. ran out of tokens), show a clean note.
-            err  = str(cluster.get("ai_strapline", "")).strip().endswith("Error")
-            body = "Error Occurred" if err else cluster.get("ai_description", "")
+            newsdrum_version = make_payload({
+                "headline": headline,
+                "strapline": cluster.get("ai_strapline", ""),
+                "body": cluster.get("ai_description", "")
+            })
+
             all_rows.append([
-                f"Trending ({len(cluster['sources'])} sources)\nCovered by: {sources_str}",
-                headline,
-                body,
-                cluster.get("link", "#"),   # Source link
+                f"Trending ({len(cluster['sources'])} sources)",
+                cluster['title'],
+                newsdrum_version
             ])
         st.session_state.publish_excel = build_excel(all_rows)
         st.session_state.publish_state = "ready"
@@ -365,46 +380,16 @@ if st.session_state.publish_state == "loading":
             items = fetch_top_stories(source, limit=5)
             for item in items:
                 data = rewrite_with_gemini(item["title"], item["description"])
-                # If Gemini errored (e.g. ran out of tokens), don't paste the
-                # raw error — just mark the cell as "Error Occurred".
-                description = "Error Occurred" if is_error(data) else data["body"]
                 all_rows.append([
-                    source,                 # Source News
-                    data["headline"],       # News Headline (Gemini)
-                    description,            # News Description (Gemini) / error note
-                    item["link"],          # Source Link (from the website)
+                    source,
+                    item['title'],
+                    make_payload(data)
                 ])
 
         progress_bar.progress(1.0, text="Done!")
         st.session_state.publish_excel = build_excel(all_rows)
         st.session_state.publish_state = "ready"
         st.rerun()
-
-# ── Render Publish button into slot ──────────────────────────
-with btn_slot:
-    if st.session_state.publish_state == "idle":
-        if st.button("📤 Publish", use_container_width=True):
-            st.session_state.publish_state = "loading"
-            st.rerun()
-
-    elif st.session_state.publish_state == "loading":
-        st.button("⏳ Preparing…", disabled=True, use_container_width=True)
-
-    elif st.session_state.publish_state == "ready":
-        if st.session_state.trending_state == "ready":
-            fname = f"newsdrum_trending_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-            label = "📥 Download Trending"
-        else:
-            fname = f"newsdrum_all_sources_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-            label = "📥 Download All"
-
-        st.download_button(
-            label=label,
-            data=st.session_state.publish_excel,
-            file_name=fname,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
 
 # ── TRENDING: loading phase — scan all sources for common stories ─
 if st.session_state.trending_state == "loading":
@@ -490,12 +475,14 @@ if st.session_state.publish_state != "loading" and st.session_state.trending_sta
                 for idx, item in enumerate(raw_items):
                     with st.spinner(f"AI is writing story {idx + 1} of {len(raw_items)}…"):
                         col1_data = rewrite_with_gemini(item["title"], item["description"])
+                        accuracy = calculate_accuracy_with_groq(item["description"], col1_data["body"])
                         # --- DISABLED: only Gemini news is shown for now ---
                         # col2_data = rewrite_with_nvidia(item["title"], item["description"])
                         # col3_data = rewrite_with_groq(item["title"], item["description"])
                     cached_items.append({
                         "raw": item,
                         "col1_data": col1_data,
+                        "accuracy": accuracy,
                         # "col2_data": col2_data,
                         # "col3_data": col3_data
                     })
@@ -525,10 +512,12 @@ if st.session_state.publish_state != "loading" and st.session_state.trending_sta
                     st.markdown(item['description'], unsafe_allow_html=True)
                     st.link_button("🔗 View Original Source", item["link"])
 
-                def render_native_card(model_label, data, column_ref, key_suffix):
+                def render_native_card(model_label, data, column_ref, key_suffix, accuracy=None):
                     with column_ref:
                         with st.container(border=True):
+                            acc_html = f'<div class="accuracy-badge">🎯 Accuracy: {accuracy}</div>' if accuracy else ''
                             st.markdown(f"""
+                                {acc_html}
                                 <div class="model-badge">{model_label}</div>
                                 <div class="meta-headline">{data['headline']}</div>
                                 <div class="meta-strapline">{data['strapline']}</div>
@@ -544,8 +533,31 @@ if st.session_state.publish_state != "loading" and st.session_state.trending_sta
                             )
 
                 # Only Gemini is active — render it full width.
-                render_native_card("Gemini 2.5 Flash", col1_data, st.container(), "1")
+                render_native_card("Gemini 2.5 Flash", col1_data, st.container(), "1", accuracy=cached_item.get("accuracy"))
                 # --- DISABLED: Groq and NVIDIA cards ---
                 # col1, col2, col3 = st.columns(3)
                 # render_native_card("NVIDIA Nemotron 1B",  col2_data, col2, "2")
                 # render_native_card("Groq Llama 3.1",       col3_data, col3, "3")
+
+# ── Render Publish / Download button at the end ────────────────────────
+if st.session_state.publish_state != "loading":
+    with btn_slot:
+        if st.session_state.publish_state == "idle":
+            if st.button("📤 Publish", use_container_width=True):
+                st.session_state.publish_state = "loading"
+                st.rerun()
+        elif st.session_state.publish_state == "ready":
+            if st.session_state.trending_state == "ready":
+                fname = f"newsdrum_trending_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+                label = "📥 Download Trending"
+            else:
+                fname = f"newsdrum_all_sources_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+                label = "📥 Download All"
+
+            st.download_button(
+                label=label,
+                data=st.session_state.publish_excel,
+                file_name=fname,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )

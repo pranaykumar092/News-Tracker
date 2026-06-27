@@ -1,0 +1,46 @@
+# System Overview
+Newsdrum AI Aggregator Panel is a web application that intercepts top news stories from various news portals via RSS feeds and dynamically rewrites the news content using Large Language Models like Google Gemini. Its core objective is to automate the aggregation, summarization, and formatting of news articles, evaluate their factual accuracy, and export the compiled content for publication or external use.
+
+# Tech Stack
+- **Primary Language:** Python
+- **Framework:** Streamlit
+- **Agentic/AI Tools:** Google Gemini (google-generativeai), Groq API, NVIDIA (via OpenRouter API / OpenAI SDK)
+- **Data Processing/Scraping:** feedparser (RSS parsing), httpx
+- **Exporting/Formatting:** openpyxl (Excel creation)
+
+# Directory Map
+```text
+.
+├── app.py             # Main Streamlit application entry point handling UI state, rendering, and Excel exports
+├── utils.py           # Core utilities including RSS fetching, parsing, and LLM API wrappers
+├── requirements.txt   # Python dependencies
+├── README.md          # Project documentation
+└── .env               # Secrets configuration (API keys for Gemini, Groq, OpenRouter)
+```
+
+# Core Workflows
+1. **Data Ingestion:** The user selects a news source in the UI. `app.py` triggers `fetch_top_stories` (from `utils.py`) to fetch and parse the corresponding RSS feed using `feedparser` and fetches the actual article body.
+2. **AI Content Generation:** The retrieved articles are passed to AI model wrappers, specifically `rewrite_with_gemini`, to rewrite headlines and descriptions into formatted news snippets.
+3. **Accuracy Verification:** The system calls `calculate_accuracy_with_groq` to compare the original article text with the AI-generated summary, yielding a percentage score reflecting factual accuracy.
+4. **Trend Analysis (Optional):** Users can scan for trending stories across all sources, clustering articles by similarity.
+5. **Publish/Export:** The user can compile all gathered and processed stories and export them to an Excel spreadsheet. The `build_excel` function in `app.py` handles writing the rows to a `.xlsx` file using `openpyxl`.
+
+# Key Interfaces & Schemas
+
+### `utils.py`
+- `fetch_top_stories(source_name: str, limit: int = 5) -> List[Dict[str, str]]`
+  **Output Schema:** A list of dictionaries with keys: `title`, `description`, `link`, `published`.
+
+- `rewrite_with_gemini(title: str, context: str) -> Dict[str, str]`
+  **Output Schema:** A dictionary with keys: `headline`, `strapline`, `body`.
+
+- `calculate_accuracy_with_groq(original_context: str, generated_content: str) -> str`
+  **Output Schema:** A string containing the integer percentage, e.g., `"95%"`.
+
+- `RSS_FEEDS: Dict[str, str]`
+  **Definition:** A global dictionary mapping source names (e.g., "BBC", "CNN") to their RSS feed URLs.
+
+### `app.py`
+- `build_excel(rows: List[List[str]]) -> bytes`
+  **Input Schema:** A list of lists representing rows. The expected columns are `["Source News", "News Headline", "News Description", "Source Link"]`.
+  **Output Schema:** Bytes representing the generated Excel file.

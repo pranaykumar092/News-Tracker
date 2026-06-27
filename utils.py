@@ -908,17 +908,29 @@ def parse_ai_response(response_text, original_title):
 
     return parsed
 
-def rewrite_with_groq(title, context):
+def calculate_accuracy_with_groq(original_context, generated_content):
     try:
-        chat = groq_client.chat.completions.create(
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": f"Title: {title}\nContext: {context}"}],
-            model="llama-3.1-8b-instant",
-            temperature=0.7,
-            max_tokens=500
+        prompt = (
+            "You are a strict fact-checker. Compare the original source text with the generated summary. "
+            "Determine the factual accuracy of the generated summary as a percentage from 0 to 100. "
+            "Only output the integer number (e.g. 85, 95, 100). Do not output any other text or symbols.\n\n"
+            f"Original Source Text:\n{original_context}\n\n"
+            f"Generated Summary:\n{generated_content}"
         )
-        return parse_ai_response(chat.choices[0].message.content, title)
+        chat = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+            temperature=0.1,
+            max_tokens=10
+        )
+        result = chat.choices[0].message.content.strip()
+        import re
+        match = re.search(r'\d+', result)
+        if match:
+            return f"{match.group()}%"
+        return "N/A"
     except Exception as e:
-        return {"headline": title, "strapline": "Groq Error", "body": str(e)}
+        return "Error"
 
 def rewrite_with_gemini(title, context):
     try:
