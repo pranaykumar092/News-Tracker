@@ -1,4 +1,6 @@
 import os
+import smtplib
+from email.message import EmailMessage
 import feedparser
 import requests
 from requests.adapters import HTTPAdapter
@@ -282,3 +284,33 @@ def rewrite_with_nvidia(title, context):
         return parse_ai_response(chat.choices[0].message.content, title)
     except Exception as e:
         return {"headline": title, "strapline": "NVIDIA Error", "body": str(e)}
+
+def send_email_with_excel(recipient_emails, excel_bytes, filename):
+    smtp_email = os.environ.get("SMTP_EMAIL")
+    smtp_password = os.environ.get("SMTP_PASSWORD")
+    
+    if not smtp_email or not smtp_password:
+        return False, "SMTP credentials missing in environment variables."
+        
+    try:
+        msg = EmailMessage()
+        msg['Subject'] = "Newsdrum Report"
+        msg['From'] = smtp_email
+        msg['To'] = ", ".join([email.strip() for email in recipient_emails.split(",")])
+        msg.set_content("Please find the requested Newsdrum report attached.")
+        
+        msg.add_attachment(
+            excel_bytes,
+            maintype='application',
+            subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            filename=filename
+        )
+        
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(smtp_email, smtp_password)
+            smtp.send_message(msg)
+            
+        return True, "Email sent successfully!"
+    except Exception as e:
+        return False, f"Failed to send email: {str(e)}"
+

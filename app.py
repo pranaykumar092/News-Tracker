@@ -7,7 +7,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 from st_copy_to_clipboard import st_copy_to_clipboard
-from utils import RSS_FEEDS, fetch_top_stories, calculate_accuracy_with_groq, rewrite_with_gemini, rewrite_with_nvidia
+from utils import RSS_FEEDS, fetch_top_stories, calculate_accuracy_with_groq, rewrite_with_gemini, rewrite_with_nvidia, send_email_with_excel
 
 st.set_page_config(page_title="Newsdrum AI Aggregator Panel", layout="wide")
 
@@ -358,6 +358,22 @@ with st.sidebar:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
+        st.divider()
+        team_emails = st.text_input("Team Emails (comma-separated)", placeholder="leader@example.com")
+        if st.button("✉️ Email Report", use_container_width=True, type="primary"):
+            if team_emails.strip():
+                with st.spinner("Sending..."):
+                    success, msg = send_email_with_excel(
+                        team_emails, 
+                        st.session_state.publish_excel, 
+                        fname
+                    )
+                if success:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+            else:
+                st.error("Please enter at least one email address.")
     elif selected_export_sources:
         if st.button("📤 Compile Selected Sources", use_container_width=True, type="primary"):
             st.session_state.publish_state = "loading"
