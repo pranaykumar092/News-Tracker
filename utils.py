@@ -281,4 +281,8 @@ def rewrite_with_nvidia(title, context):
         )
         return parse_ai_response(chat.choices[0].message.content, title)
     except Exception as e:
+<<<<<<< Updated upstream
         return {"headline": title, "strapline": "NVIDIA Error", "body": str(e)}
+=======
+        return {"headline": title, "strapline": "NVIDIA Error", "body": str(e)}
+>>>>>>> Stashed changes
