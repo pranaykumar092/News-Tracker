@@ -7,7 +7,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 from st_copy_to_clipboard import st_copy_to_clipboard
-from utils import RSS_FEEDS, fetch_top_stories, rewrite_with_groq, rewrite_with_gemini, rewrite_with_nvidia
+from utils import RSS_FEEDS, fetch_top_stories, calculate_accuracy_with_groq, rewrite_with_gemini, rewrite_with_nvidia
 
 st.set_page_config(page_title="Newsdrum AI Aggregator Panel", layout="wide")
 
@@ -33,7 +33,7 @@ def build_excel(rows):
     ws = wb.active
     ws.title = "Newsdrum Export"
 
-    headers = ["Source News", "News Headline", "News Description", "Source Link"]
+    headers = ["Source", "Source link", "Source News", "NewsDrum Version"]
     col_widths = [len(h) for h in headers]
 
     def thin():
@@ -52,14 +52,24 @@ def build_excel(rows):
         max_lines = 1
         for c, val in enumerate(row, 1):
             text = str(val) if val else ""
-            cell = ws.cell(row=r, column=c, value=text)
-            cell.font      = Font(name="Arial", size=10)
+            
+            # Format Source link column as a clickable hyperlink to save space
+            if c == 2 and text.startswith("http"):
+                cell = ws.cell(row=r, column=c, value="View Source")
+                cell.hyperlink = text
+                cell.font = Font(name="Arial", size=10, color="0563C1", underline="single")
+                display_text = "View Source"
+            else:
+                cell = ws.cell(row=r, column=c, value=text)
+                cell.font = Font(name="Arial", size=10)
+                display_text = text
+
             cell.alignment = Alignment(vertical="top", wrap_text=True)
             cell.border    = thin()
-            longest_line   = max((len(line) for line in text.split("\n")), default=0)
+            longest_line   = max((len(line) for line in display_text.split("\n")), default=0)
             col_widths[c-1] = min(80, max(col_widths[c-1], longest_line))
             cap   = col_widths[c-1] if col_widths[c-1] > 0 else 1
-            lines = sum(max(1, (len(line)+cap-1)//cap) for line in text.split("\n"))
+            lines = sum(max(1, (len(line)+cap-1)//cap) for line in display_text.split("\n"))
             max_lines = max(max_lines, lines)
         ws.row_dimensions[r].height = min(400, max(18, max_lines * 15))
 
@@ -194,6 +204,17 @@ st.markdown("""
         background-color: transparent !important;
     }
 
+    .accuracy-badge {
+        float: right;
+        background-color: #f1f5f9;
+        color: #10b981;
+        padding: 4px 10px;
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: 800;
+        border: 1px solid #e2e8f0;
+    }
+
     .model-badge {
         font-size: 12px; font-weight: 700; text-transform: uppercase;
         letter-spacing: 1px; margin-bottom: 10px; color: #64748b;
@@ -310,87 +331,19 @@ with st.sidebar:
         key="trending_btn",
     )
     st.write("### TRACKED SOURCES")
-    selected_source = st.radio(
-        "Select News Portal",
-        options=list(RSS_FEEDS.keys()),
-        label_visibility="collapsed"
-    )
-
-st.session_state.active_source = selected_source
-if refresh_clicked:
-    st.session_state.publish_state = "idle"
-    st.session_state.publish_excel = None
-    st.session_state.trending_state = "idle"   # return to normal feed
-    st.session_state.live_feed_cache = {}      # Clear cache to force re-fetch
-
-if trending_clicked:
-    st.session_state.trending_state = "loading"
-    st.rerun()
-
-# ── Header row ────────────────────────────────────────────────
-header_col, btn_col = st.columns([5, 1])
-with header_col:
-    st.subheader(f"⚡ Live Feed: {selected_source}")
-
-btn_slot = btn_col.empty()   # filled after any heavy work below
-
-# ── PUBLISH: loading phase — fetch ALL sources + rewrite ──────
-if st.session_state.publish_state == "loading":
-    all_rows = []
-
-    if st.session_state.trending_state == "ready" and st.session_state.trending_results:
-        st.info("📤 Compiling trending stories for publish…")
-        for cluster in st.session_state.trending_results:
-            sources_str = ", ".join(sorted(cluster["sources"]))
-            headline = cluster.get("ai_headline", cluster["title"])
-            # If the rewrite errored (e.g. ran out of tokens), show a clean note.
-            err  = str(cluster.get("ai_strapline", "")).strip().endswith("Error")
-            body = "Error Occurred" if err else cluster.get("ai_description", "")
-            all_rows.append([
-                f"Trending ({len(cluster['sources'])} sources)\nCovered by: {sources_str}",
-                headline,
-                body,
-                cluster.get("link", "#"),   # Source link
-            ])
-        st.session_state.publish_excel = build_excel(all_rows)
-        st.session_state.publish_state = "ready"
-        st.rerun()
-    else:
-        sources  = list(RSS_FEEDS.keys())
-        st.info("📤 Compiling all sources for publish…")
-        progress_bar = st.progress(0, text="Starting…")
-
-        for i, source in enumerate(sources):
-            progress_bar.progress((i) / len(sources), text=f"Fetching {source}…")
-            items = fetch_top_stories(source, limit=5)
-            for item in items:
-                data = rewrite_with_gemini(item["title"], item["description"])
-                # If Gemini errored (e.g. ran out of tokens), don't paste the
-                # raw error — just mark the cell as "Error Occurred".
-                description = "Error Occurred" if is_error(data) else data["body"]
-                all_rows.append([
-                    source,                 # Source News
-                    data["headline"],       # News Headline (Gemini)
-                    description,            # News Description (Gemini) / error note
-                    item["link"],          # Source Link (from the website)
-                ])
-
-        progress_bar.progress(1.0, text="Done!")
-        st.session_state.publish_excel = build_excel(all_rows)
-        st.session_state.publish_state = "ready"
-        st.rerun()
-
-# ── Render Publish button into slot ──────────────────────────
-with btn_slot:
-    if st.session_state.publish_state == "idle":
-        if st.button("📤 Publish", use_container_width=True):
-            st.session_state.publish_state = "loading"
-            st.rerun()
-
-    elif st.session_state.publish_state == "loading":
-        st.button("⏳ Preparing…", disabled=True, use_container_width=True)
-
-    elif st.session_state.publish_state == "ready":
+    selected_export_sources = []
+    for source in list(RSS_FEEDS.keys()):
+        col_left, col_right = st.columns([4, 1])
+        with col_left:
+            if st.button(source, use_container_width=True, key=f"btn_{source}"):
+                st.session_state.active_source = source
+        with col_right:
+            if st.checkbox("Export", key=f"export_{source}", label_visibility="collapsed"):
+                selected_export_sources.append(source)
+    
+    st.write("---")
+    
+    if st.session_state.publish_state == "ready":
         if st.session_state.trending_state == "ready":
             fname = f"newsdrum_trending_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
             label = "📥 Download Trending"
@@ -405,7 +358,85 @@ with btn_slot:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
+    elif selected_export_sources:
+        if st.button("📤 Compile Selected Sources", use_container_width=True, type="primary"):
+            st.session_state.publish_state = "loading"
+            st.rerun()
 
+if st.session_state.active_source is None:
+    st.session_state.active_source = list(RSS_FEEDS.keys())[0]
+selected_source = st.session_state.active_source
+if refresh_clicked:
+    st.session_state.publish_state = "idle"
+    st.session_state.publish_excel = None
+    st.session_state.trending_state = "idle"   # return to normal feed
+    st.session_state.live_feed_cache = {}      # Clear cache to force re-fetch
+
+if trending_clicked:
+    st.session_state.trending_state = "loading"
+    st.rerun()
+
+# ── Header row ────────────────────────────────────────────────
+st.subheader(f"⚡ Live Feed: {selected_source}")
+
+# ── PUBLISH: loading phase — fetch ALL sources + rewrite ──────
+if st.session_state.publish_state == "loading":
+    all_rows = []
+
+    if st.session_state.trending_state == "ready" and st.session_state.trending_results:
+        st.info("📤 Compiling trending stories for publish…")
+        for cluster in st.session_state.trending_results:
+            sources_str = ", ".join(sorted(cluster["sources"]))
+            headline = cluster.get("ai_headline", cluster["title"])
+            newsdrum_version = make_payload({
+                "headline": headline,
+                "strapline": cluster.get("ai_strapline", ""),
+                "body": cluster.get("ai_description", "")
+            })
+
+            all_rows.append([
+                f"Trending ({len(cluster['sources'])} sources)",
+                cluster.get("link", "#"),
+                cluster['title'],
+                newsdrum_version
+            ])
+        st.session_state.publish_excel = build_excel(all_rows)
+        st.session_state.publish_state = "ready"
+        st.rerun()
+    else:
+        sources = selected_export_sources
+        st.info("📤 Compiling selected sources for publish…")
+        progress_bar = st.progress(0, text="Starting…")
+
+        for i, source in enumerate(sources):
+            progress_bar.progress((i) / len(sources), text=f"Fetching {source}…")
+            
+            if source in st.session_state.live_feed_cache and st.session_state.live_feed_cache[source] is not None:
+                cached_source_data = st.session_state.live_feed_cache[source]
+                for cached_item in cached_source_data:
+                    item = cached_item["raw"]
+                    data = cached_item["col1_data"]
+                    all_rows.append([
+                        source,
+                        item['link'],
+                        item['title'],
+                        make_payload(data)
+                    ])
+            else:
+                items = fetch_top_stories(source, limit=5)
+                for item in items:
+                    data = rewrite_with_gemini(item["title"], item["description"])
+                    all_rows.append([
+                        source,
+                        item['link'],
+                        item['title'],
+                        make_payload(data)
+                    ])
+
+        progress_bar.progress(1.0, text="Done!")
+        st.session_state.publish_excel = build_excel(all_rows)
+        st.session_state.publish_state = "ready"
+        st.rerun()
 # ── TRENDING: loading phase — scan all sources for common stories ─
 if st.session_state.trending_state == "loading":
     st.subheader("🔥 Trending Across All Sources")
@@ -490,12 +521,14 @@ if st.session_state.publish_state != "loading" and st.session_state.trending_sta
                 for idx, item in enumerate(raw_items):
                     with st.spinner(f"AI is writing story {idx + 1} of {len(raw_items)}…"):
                         col1_data = rewrite_with_gemini(item["title"], item["description"])
+                        accuracy = calculate_accuracy_with_groq(item["description"], col1_data["body"])
                         # --- DISABLED: only Gemini news is shown for now ---
                         # col2_data = rewrite_with_nvidia(item["title"], item["description"])
                         # col3_data = rewrite_with_groq(item["title"], item["description"])
                     cached_items.append({
                         "raw": item,
                         "col1_data": col1_data,
+                        "accuracy": accuracy,
                         # "col2_data": col2_data,
                         # "col3_data": col3_data
                     })
@@ -525,10 +558,12 @@ if st.session_state.publish_state != "loading" and st.session_state.trending_sta
                     st.markdown(item['description'], unsafe_allow_html=True)
                     st.link_button("🔗 View Original Source", item["link"])
 
-                def render_native_card(model_label, data, column_ref, key_suffix):
+                def render_native_card(model_label, data, column_ref, key_suffix, accuracy=None):
                     with column_ref:
                         with st.container(border=True):
+                            acc_html = f'<div class="accuracy-badge">🎯 Accuracy: {accuracy}</div>' if accuracy else ''
                             st.markdown(f"""
+                                {acc_html}
                                 <div class="model-badge">{model_label}</div>
                                 <div class="meta-headline">{data['headline']}</div>
                                 <div class="meta-strapline">{data['strapline']}</div>
@@ -544,8 +579,10 @@ if st.session_state.publish_state != "loading" and st.session_state.trending_sta
                             )
 
                 # Only Gemini is active — render it full width.
-                render_native_card("Gemini 2.5 Flash", col1_data, st.container(), "1")
+                render_native_card("Gemini 2.5 Flash", col1_data, st.container(), "1", accuracy=cached_item.get("accuracy"))
                 # --- DISABLED: Groq and NVIDIA cards ---
                 # col1, col2, col3 = st.columns(3)
                 # render_native_card("NVIDIA Nemotron 1B",  col2_data, col2, "2")
                 # render_native_card("Groq Llama 3.1",       col3_data, col3, "3")
+
+# ── End of App ────────────────────────────────────────────────
