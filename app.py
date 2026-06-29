@@ -379,8 +379,7 @@ with st.sidebar:
             st.session_state.publish_state = "loading"
             st.rerun()
 
-if st.session_state.active_source is None:
-    st.session_state.active_source = list(RSS_FEEDS.keys())[0]
+# Automatic fetching fallback disabled for landing screen
 selected_source = st.session_state.active_source
 if refresh_clicked:
     st.session_state.publish_state = "idle"
@@ -393,7 +392,8 @@ if trending_clicked:
     st.rerun()
 
 # ── Header row ────────────────────────────────────────────────
-st.subheader(f"⚡ Live Feed: {selected_source}")
+if selected_source:
+    st.subheader(f"⚡ Live Feed: {selected_source}")
 
 # ── PUBLISH: loading phase — fetch ALL sources + rewrite ──────
 if st.session_state.publish_state == "loading":
@@ -525,7 +525,15 @@ if st.session_state.trending_state == "ready":
 
 # ── Main live feed (hidden while publishing or viewing trending) ─
 if st.session_state.publish_state != "loading" and st.session_state.trending_state == "idle":
-    if selected_source:
+    if st.session_state.active_source is None:
+        st.markdown("<h2 style='text-align: center; margin-top: 80px;'>Welcome to Newsdrum AI Aggregator Panel</h2>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; color: #64748b; margin-bottom: 30px;'>Select a tracked source from the sidebar, or click below to begin.</p>", unsafe_allow_html=True)
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            if st.button("🚀 Get Started / Load Live Feed", use_container_width=True):
+                st.session_state.active_source = list(RSS_FEEDS.keys())[0]
+                st.rerun()
+    elif selected_source:
         if selected_source not in st.session_state.live_feed_cache:
             with st.spinner(f"Intercepting top stories from {selected_source}..."):
                 raw_items = fetch_top_stories(selected_source, limit=5)
